@@ -74,7 +74,15 @@ async def login(page: Page, usuario: str, password: str, tipo_doc: str = "Cedula
         await page.wait_for_load_state("networkidle", timeout=15000)
     except Exception:
         log("  networkidle timeout, continuando...")
-    await page.wait_for_timeout(2000)
+    await page.wait_for_timeout(3000)
+
+    # Esperar a que React renderice el formulario
+    log("  Esperando formulario de login...")
+    try:
+        await page.wait_for_selector('input[role="combobox"]', state="visible", timeout=30000)
+    except Exception:
+        log("  Combobox no visible, esperando mas...")
+        await page.wait_for_timeout(5000)
     await debug_screenshot(page, "01_login_page")
 
     # -- Tipo de documento (combobox MUI Autocomplete) --
