@@ -842,10 +842,25 @@ async def intentar_reserva(usuario_key: str = "1"):
         browser = await p.chromium.launch(
             headless=CONFIG["HEADLESS"],
             slow_mo=CONFIG["SLOW_MO_MS"],
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-infobars",
+                "--window-size=1280,900",
+            ],
         )
         context = await browser.new_context(
             viewport={"width": 1280, "height": 900},
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
         )
+        # Anti-deteccion: ocultar webdriver
+        await context.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+            Object.defineProperty(navigator, 'languages', {get: () => ['es-CO', 'es', 'en']});
+            Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
+            window.chrome = {runtime: {}};
+        """)
         context.set_default_timeout(CONFIG["DEFAULT_TIMEOUT_MS"])
         page = await context.new_page()
 
