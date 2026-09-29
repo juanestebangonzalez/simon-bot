@@ -1,0 +1,20 @@
+# Credenciales
+.env
+
+# Python
+__pycache__/
+*.pyc
+venv/
+
+# Debug
+debug/
+
+# Logs
+logs/
+
+# Claude outputs
+Claude outputs/
+
+# OS
+.DS_Store
+Thumbs.db
