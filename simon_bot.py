@@ -69,7 +69,11 @@ async def debug_screenshot(page: Page, nombre: str):
 async def login(page: Page, usuario: str, password: str, tipo_doc: str = "Cedula de Ciudadania"):
     """Inicia sesion en SIMON 2.0"""
     log("Navegando a login...")
-    await page.goto(CONFIG["URL_LOGIN"], wait_until="networkidle", timeout=30000)
+    await page.goto(CONFIG["URL_LOGIN"], wait_until="domcontentloaded", timeout=60000)
+    try:
+        await page.wait_for_load_state("networkidle", timeout=15000)
+    except Exception:
+        log("  networkidle timeout, continuando...")
     await page.wait_for_timeout(2000)
     await debug_screenshot(page, "01_login_page")
 
@@ -213,7 +217,7 @@ async def login(page: Page, usuario: str, password: str, tipo_doc: str = "Cedula
 async def ir_a_reservar(page: Page, nombre_escenario: str):
     """Navega a la lista de reservas, busca el escenario y hace clic en Reservar"""
     log("Navegando a lista de reservas...")
-    await page.goto(CONFIG["URL_RESERVAS"], wait_until="networkidle", timeout=30000)
+    await page.goto(CONFIG["URL_RESERVAS"], wait_until="domcontentloaded", timeout=60000)
     await page.wait_for_timeout(2000)
 
     # -- Buscar escenario --
@@ -901,7 +905,7 @@ async def intentar_reserva(usuario_key: str = "1"):
                             return True
 
                     # Si no se pudo reservar, volver a la pagina de reserva
-                    await page.goto(CONFIG["URL_RESERVAS"], wait_until="networkidle")
+                    await page.goto(CONFIG["URL_RESERVAS"], wait_until="domcontentloaded", timeout=60000)
                     await page.wait_for_timeout(1000)
                     ir_ok = await ir_a_reservar(page, escenario)
                     if not ir_ok:
