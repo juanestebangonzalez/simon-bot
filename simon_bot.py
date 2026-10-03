@@ -226,21 +226,33 @@ async def ir_a_reservar(page: Page, nombre_escenario: str):
     """Navega a la lista de reservas, busca el escenario y hace clic en Reservar"""
     log("Navegando a lista de reservas...")
     await page.goto(CONFIG["URL_RESERVAS"], wait_until="domcontentloaded", timeout=60000)
-    await page.wait_for_timeout(2000)
+    try:
+        await page.wait_for_load_state("networkidle", timeout=15000)
+    except Exception:
+        log("  networkidle timeout en reservas, continuando...")
+    await page.wait_for_timeout(3000)
 
     # -- Buscar escenario --
     # Extraer palabra clave para buscar (evita problemas de acentos en el search box)
     palabra_clave = extraer_palabra_clave(nombre_escenario)
     log(f"  Buscando: {nombre_escenario} (clave: '{palabra_clave}')")
 
-    search = page.locator('input[type="search"]').first
+    # Esperar a que aparezca algun campo de busqueda
+    search = None
+    for selector in ['input[type="search"]', 'input[placeholder*="Buscar" i]', 'input[aria-label*="Buscar" i]', 'input[type="text"]']:
+        try:
+            loc = page.locator(selector).first
+            await loc.wait_for(state="visible", timeout=10000)
+            search = loc
+            log(f"  Campo de busqueda encontrado: {selector}")
+            break
+        except Exception:
+            continue
 
-    # Si no hay input[type="search"], buscar campo Buscar por placeholder o label
-    search_count = await search.count()
-    if search_count == 0:
-        search = page.locator('input[placeholder*="Buscar" i]').first
-        if await search.count() == 0:
-            search = page.locator('input[aria-label*="Buscar" i]').first
+    if search is None:
+        log("  ERROR: No se encontro campo de busqueda")
+        await debug_screenshot(page, "04_no_search_field")
+        return False
 
     await search.fill(palabra_clave)
     await page.wait_for_timeout(2000)
