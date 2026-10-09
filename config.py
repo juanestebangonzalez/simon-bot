@@ -109,6 +109,7 @@ CONFIG = {
     # ── Debug ──────────────────────────────────────────────────────────
     "DEBUG_SCREENSHOTS": True,
     "DEBUG_DIR": os.path.join(os.path.dirname(os.path.abspath(__file__)), "debug"),
+    "DEBUG_DIAS_RETENCION": 7,   # borra capturas mas viejas que esto
 
     # ── URLs ───────────────────────────────────────────────────────────
     "URL_BASE": "https://simon.inder.gov.co",

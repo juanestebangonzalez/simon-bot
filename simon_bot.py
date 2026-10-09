@@ -58,6 +58,28 @@ def log(msg: str):
 
 # ── Debug helpers ──────────────────────────────────────────────────────
 
+def limpiar_debug(dias: int = 7):
+    """
+    Borra capturas viejas de debug/. Sin esto la carpeta crece sin freno
+    (llego a 57 MB con 356 archivos).
+    """
+    d = Path(CONFIG["DEBUG_DIR"])
+    if not d.exists():
+        return
+    limite = datetime.now().timestamp() - dias * 86400
+    borrados = 0
+    for f in d.iterdir():
+        try:
+            if f.is_file() and f.stat().st_mtime < limite:
+                f.unlink()
+                borrados += 1
+        except OSError:
+            pass
+    if borrados:
+        log(f"Limpieza: se borraron {borrados} archivos de debug/ "
+            f"con mas de {dias} dias")
+
+
 async def debug_screenshot(page: Page, nombre: str):
     """Guarda screenshot + HTML en carpeta debug/"""
     if not CONFIG.get("DEBUG_SCREENSHOTS"):
@@ -73,6 +95,60 @@ async def debug_screenshot(page: Page, nombre: str):
     except Exception:
         pass
     log(f"  [debug] screenshot: {fname}")
+
+
+
+# ── Captura de errores HTTP (para diagnosticar el 500 de SIMON) ───────
+
+ERRORES_API = []
+
+
+def _instalar_captura_errores(page):
+    """
+    Registra toda respuesta HTTP con codigo >= 400. Cuando SIMON devuelve
+    500 al guardar, aqui queda la URL, lo que se le envio y lo que
+    respondio, que es lo unico que permite saber que esta rechazando.
+    """
+    async def _al_responder(resp):
+        try:
+            if resp.status < 400:
+                return
+            try:
+                cuerpo = (await resp.text())[:600]
+            except Exception:
+                cuerpo = "(no se pudo leer el cuerpo)"
+            try:
+                enviado = (resp.request.post_data or "")[:600]
+            except Exception:
+                enviado = ""
+            ERRORES_API.append({
+                "status": resp.status,
+                "metodo": resp.request.method,
+                "url": resp.url,
+                "enviado": enviado,
+                "respuesta": cuerpo,
+            })
+            log(f"  [HTTP {resp.status}] {resp.request.method} {resp.url}")
+        except Exception:
+            pass
+
+    page.on("response", _al_responder)
+
+
+def _volcar_errores_api(desde=0):
+    """Escribe en el log el detalle de los errores HTTP capturados."""
+    nuevos = ERRORES_API[desde:]
+    if not nuevos:
+        log("  (no se capturo ninguna respuesta HTTP con error)")
+        return ""
+    resumen = []
+    for e in nuevos:
+        log(f"  ── HTTP {e['status']} {e['metodo']} {e['url']}")
+        if e["enviado"]:
+            log(f"     se envio : {e['enviado']}")
+        log(f"     respondio: {e['respuesta']}")
+        resumen.append(f"HTTP {e['status']} en {e['url'].split('/')[-1] or e['url']}")
+    return "; ".join(resumen)
 
 
 # ── Paso 1: Login ─────────────────────────────────────────────────────
@@ -997,6 +1073,15 @@ async def guardar_reserva(page: Page):
     log(f"  [1/2] Clic en '{p1}' dentro del panel")
     await page.wait_for_timeout(3000)
 
+    # Esperar a que SIMON termine de procesar el panel antes de seguir.
+    # Pulsar el GUARDAR final demasiado pronto es una causa tipica del 500.
+    try:
+        await page.wait_for_load_state("networkidle", timeout=10000)
+    except Exception:
+        log("       (networkidle no llego, se continua)")
+    await page.wait_for_timeout(1500)
+
+
     aviso = await _js(page, "return toast();")
     if aviso:
         log(f"       SIMON responde: {aviso}")
@@ -1019,6 +1104,7 @@ async def guardar_reserva(page: Page):
     await page.wait_for_timeout(1200)
 
     url_antes = page.url
+    errores_antes = len(ERRORES_API)
     p2 = await _pulsar_guardar(page, "pagina")
     if not p2:
         log("  ERROR: no aparecio el boton 'Guardar' del formulario principal")
@@ -1028,6 +1114,29 @@ async def guardar_reserva(page: Page):
 
     log(f"  [2/2] Clic en '{p2}' del formulario principal")
     await page.wait_for_timeout(4000)
+
+    # Si SIMON devolvio 500, esperar y reintentar una vez
+    hubo_500 = any(e['status'] >= 500 for e in ERRORES_API[errores_antes:])
+    if hubo_500:
+        log("  SIMON devolvio 500 en el guardado. Detalle:")
+        _volcar_errores_api(errores_antes)
+        log("  Reintentando el guardado en 5 segundos...")
+        await page.wait_for_timeout(5000)
+        errores_antes = len(ERRORES_API)
+        p2b = await _pulsar_guardar(page, "pagina")
+        if p2b:
+            log(f"  [2/2 reintento] Clic en '{p2b}'")
+            await page.wait_for_timeout(5000)
+            if any(e['status'] >= 500 for e in ERRORES_API[errores_antes:]):
+                log("  El reintento tambien fallo con 500")
+                detalle = _volcar_errores_api(errores_antes)
+                PARTICIPANTES_FALTANTES.append(detalle or 'error 500 al guardar')
+                return False
+        else:
+            log("  No se pudo reintentar: no aparece el boton Guardar")
+            detalle = _volcar_errores_api(errores_antes)
+            PARTICIPANTES_FALTANTES.append(detalle or 'error 500 al guardar')
+            return False
 
     # Posible dialogo de confirmacion
     conf = await _js(page, """
@@ -1085,11 +1194,57 @@ async def verificar_reserva_creada(page: Page, bloque: dict):
     except (ValueError, TypeError):
         fecha_txt = ""
 
-    texto = await page.evaluate("() => document.body.innerText || ''")
     await debug_screenshot(page, "11_seguimiento")
 
-    if fecha_txt and fecha_txt in texto:
-        log(f"    CONFIRMADO: aparece una reserva para {fecha_txt}")
+    filas = await page.evaluate("""() => {
+        const out = [];
+        document.querySelectorAll('table tbody tr').forEach(tr => {
+            const celdas = [...tr.querySelectorAll('td, th')]
+                .map(c => (c.textContent || '').replace(/\\s+/g, ' ').trim())
+                .filter(x => x);
+            if (celdas.length) out.push(celdas);
+        });
+        return out;
+    }""")
+
+    log(f"    Reservas listadas en Seguimiento: {len(filas)}")
+    for f in filas[:12]:
+        log(f"      {' | '.join(f)}")
+
+    if not fecha_txt:
+        return None
+
+    PALABRAS_ESTADO = ("pendiente", "aprobad", "confirmad", "activ",
+                       "registrad", "rechaz", "cancel", "anulad")
+
+    for f in filas:
+        linea = " ".join(f)
+        if fecha_txt not in linea and fecha_iso not in linea:
+            continue
+
+        estado = ""
+        for c in f:
+            if any(p in quitar_tildes(c).lower() for p in PALABRAS_ESTADO):
+                estado = c
+                break
+
+        bloque["estado"] = estado or "Pendiente"
+        log(f"    CONFIRMADO: reserva para {fecha_txt} | estado: "
+            f"{estado or '(no identificado, se asume Pendiente)'}")
+
+        e = quitar_tildes(estado).lower()
+        if "rechaz" in e or "cancel" in e or "anulad" in e:
+            log("    OJO: SIMON la muestra rechazada/cancelada")
+            return False
+
+        # "Pendiente" es el estado normal de una reserva recien creada
+        return True
+
+    # Respaldo por si la tabla no se pudo leer (render distinto, paginacion)
+    texto = await page.evaluate("() => document.body.innerText || ''")
+    if fecha_txt in texto:
+        log(f"    CONFIRMADO (por texto): aparece {fecha_txt} en Seguimiento")
+        bloque["estado"] = "Pendiente"
         return True
 
     log(f"    NO aparece ninguna reserva para {fecha_txt} en Seguimiento")
@@ -1142,6 +1297,7 @@ async def intentar_reserva(usuario_key: str = "1"):
         """)
         context.set_default_timeout(CONFIG["DEFAULT_TIMEOUT_MS"])
         page = await context.new_page()
+        _instalar_captura_errores(page)
 
         try:
             # 1. Login
@@ -1224,6 +1380,8 @@ async def intentar_reserva(usuario_key: str = "1"):
                             DETALLE_RESERVA[usuario_key] = (
                                 f"{escenario} | {tercio} | "
                                 f"{bloque.get('confirmado') or bloque.get('etiqueta', '?')}"
+                                + (f" | estado: {bloque['estado']}"
+                                   if bloque.get("estado") else "")
                                 + (" (sin verificar en Seguimiento)"
                                    if bloque.get("sin_verificar") else "")
                             )
@@ -1248,6 +1406,8 @@ async def intentar_reserva(usuario_key: str = "1"):
         except Exception as e:
             log(f"ERROR: {type(e).__name__}: {e}")
             await debug_screenshot(page, "99_error")
+            log("  Respuestas HTTP con error durante la sesion:")
+            _volcar_errores_api()
             DETALLE_RESERVA[usuario_key] = f"ERROR: {type(e).__name__}: {str(e)[:150]}"
             return False
         finally:
@@ -1258,6 +1418,8 @@ async def verificar_y_reservar():
     """
     Funcion principal: intenta reservar para ambos usuarios.
     """
+    limpiar_debug(CONFIG.get("DEBUG_DIAS_RETENCION", 7))
+
     log("="*60)
     log("BOT SIMON INDER 2.0 — Inicio")
     log(f"Fecha: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
