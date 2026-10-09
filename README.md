@@ -38,7 +38,13 @@ run_ahora.py        correrlo a mano (usuario 1, 2 o ambos)
 .env.ejemplo        plantilla -> copiar a .env
 server/             despliegue en Oracle Cloud
 debug/              capturas y HTML de cada corrida
+logs/               salida de cada corrida (solo en el servidor)
 ```
+
+`debug/` y `logs/` se limpian solos: al arrancar, el bot borra todo lo que
+tenga mas de 7 dias (`DEBUG_DIAS_RETENCION` en `config.py`), y `run_bot.sh`
+hace lo mismo al terminar. Como el bot corre dos veces por semana, siempre
+queda la corrida anterior para comparar y nada mas.
 
 **Las credenciales van solo en el `.env`.** `config.py` esta en GitHub y
 no tiene valores por defecto: si falta el `.env`, el bot avisa y no corre.

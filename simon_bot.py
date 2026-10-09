@@ -65,26 +65,36 @@ def log(msg: str):
 
 # ── Debug helpers ──────────────────────────────────────────────────────
 
-def limpiar_debug(dias: int = 7):
-    """
-    Borra capturas viejas de debug/. Sin esto la carpeta crece sin freno
-    (llego a 57 MB con 356 archivos).
-    """
-    d = Path(CONFIG["DEBUG_DIR"])
-    if not d.exists():
-        return
+def _borrar_viejos(carpeta: Path, dias: int, patron="*"):
+    """Borra archivos de 'carpeta' con mas de 'dias' dias. Devuelve cuantos."""
+    if not carpeta.exists():
+        return 0
     limite = datetime.now().timestamp() - dias * 86400
     borrados = 0
-    for f in d.iterdir():
+    for f in carpeta.glob(patron):
         try:
             if f.is_file() and f.stat().st_mtime < limite:
                 f.unlink()
                 borrados += 1
         except OSError:
             pass
-    if borrados:
-        log(f"Limpieza: se borraron {borrados} archivos de debug/ "
-            f"con mas de {dias} dias")
+    return borrados
+
+
+def limpiar_debug(dias: int = 7):
+    """
+    Borra capturas y logs viejos. Sin esto las carpetas crecen sin freno
+    (debug/ llego a 57 MB con 356 archivos).
+
+    El log de la corrida actual nunca se borra: se acaba de crear, asi que
+    jamas tiene mas de 'dias' dias.
+    """
+    cap = _borrar_viejos(Path(CONFIG["DEBUG_DIR"]), dias)
+    logs = _borrar_viejos(Path(CONFIG["LOGS_DIR"]), dias, "bot_*.log")
+
+    if cap or logs:
+        log(f"Limpieza: {cap} captura(s) y {logs} log(s) de mas de "
+            f"{dias} dias")
 
 
 async def debug_screenshot(page: Page, nombre: str):
