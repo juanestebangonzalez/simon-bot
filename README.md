@@ -28,10 +28,15 @@ simon_bot.py        el bot
 config.py           escenarios, dias, horas, cedulas, URLs
 telegram_notify.py  avisos de Telegram
 run_ahora.py        correrlo a mano (usuario 1, 2 o ambos)
-.env.ejemplo        plantilla de credenciales -> copiar a .env
+.env                credenciales reales (NO se sube a GitHub)
+.env.ejemplo        plantilla -> copiar a .env
 server/             despliegue en Oracle Cloud
 debug/              capturas y HTML de cada corrida
 ```
+
+**Las credenciales van solo en el `.env`.** `config.py` esta en GitHub y
+no tiene valores por defecto: si falta el `.env`, el bot avisa y no corre.
+Hay un unico `config.py`, el de la raiz; el servidor usa ese mismo.
 
 ## Correrlo en el PC
 

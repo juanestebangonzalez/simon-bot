@@ -24,15 +24,17 @@ except ImportError:
 
 # ── Configuracion principal ────────────────────────────────────────────
 CONFIG = {
-    # Credenciales (se leen de variables de entorno)
+    # ── Credenciales ───────────────────────────────────────────────────
+    # SOLO desde el .env. Este archivo esta en GitHub: nunca poner
+    # contrasenas aqui, ni siquiera como valor por defecto.
     # Usuario 1: Juan Esteban Gonzalez
-    "USUARIO_1": os.getenv("SIMON_USUARIO_1", "1128435935"),
-    "PASSWORD_1": os.getenv("SIMON_PASSWORD_1", "1214727011Aleja*"),
+    "USUARIO_1": os.getenv("SIMON_USUARIO_1", ""),
+    "PASSWORD_1": os.getenv("SIMON_PASSWORD_1", ""),
     "TIPO_DOC_1": os.getenv("SIMON_TIPO_DOC_1", "Cedula de Ciudadania"),
 
     # Usuario 2: Juan Pablo Cacante
-    "USUARIO_2": os.getenv("SIMON_USUARIO_2", "1000871270"),
-    "PASSWORD_2": os.getenv("SIMON_PASSWORD_2", "Colombia2020*"),
+    "USUARIO_2": os.getenv("SIMON_USUARIO_2", ""),
+    "PASSWORD_2": os.getenv("SIMON_PASSWORD_2", ""),
     "TIPO_DOC_2": os.getenv("SIMON_TIPO_DOC_2", "Cedula de Ciudadania"),
 
     # ── Escenarios a intentar (en orden de preferencia) ────────────────

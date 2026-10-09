@@ -13,10 +13,8 @@ Flujo:
 """
 
 import asyncio
-import os
-import sys
 import unicodedata
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 from playwright.async_api import async_playwright, Page, TimeoutError as PwTimeout
@@ -112,6 +110,15 @@ def _instalar_captura_errores(page):
     async def _al_responder(resp):
         try:
             if resp.status < 400:
+                return
+            # Solo interesan las llamadas a SIMON, no recursos estaticos
+            # ni 404 de terceros (si no, un 503 de un CDN disparaba el
+            # reintento del guardado).
+            if "simon.inder.gov.co" not in resp.url:
+                return
+            if any(x in resp.url for x in
+                   ("/_next/static/", ".js", ".css", ".png", ".jpg",
+                    ".svg", ".woff", ".ico")):
                 return
             try:
                 cuerpo = (await resp.text())[:600]
@@ -266,7 +273,7 @@ async def login(page: Page, usuario: str, password: str, tipo_doc: str = "Cedula
 
     # -- Contrasena --
     log("  Ingresando contrasena...")
-    pass_input = page.locator('input[type="password"]')
+    pass_input = page.locator('input[type="password"]').first
     await pass_input.fill(password)
 
     await debug_screenshot(page, "02_login_filled")
@@ -430,16 +437,26 @@ async def seleccionar_tercio(page: Page, tercio: str):
     await combo.click()
     await page.wait_for_timeout(500)
 
-    # Seleccionar la opcion
-    opcion = page.locator(f'[role="option"]:has-text("{tercio}")')
+    # Seleccionar la opcion (.first: puede haber varias coincidencias
+    # y Playwright falla en modo strict si el locator no es unico)
+    opcion = page.locator(f'[role="option"]:has-text("{tercio}")').first
     try:
         await opcion.click(timeout=5000)
-    except PwTimeout:
+    except Exception:
         log(f"  ERROR: No se encontro la opcion '{tercio}'")
+        await page.keyboard.press("Escape")
+        await debug_screenshot(page, "06_tercio_no_encontrado")
         return False
 
     # Esperar a que el calendario se cargue
     await page.wait_for_timeout(3000)
+
+    valor = await combo.input_value()
+    if quitar_tildes(tercio).lower() not in quitar_tildes(valor or "").lower():
+        log(f"  ERROR: la division quedo en '{valor}' y no en '{tercio}'")
+        await debug_screenshot(page, "06_tercio_mal_seleccionado")
+        return False
+
     log(f"  Division '{tercio}' seleccionada")
     await debug_screenshot(page, f"06_tercio_{tercio.replace(' ', '_')}")
     return True
@@ -1214,6 +1231,13 @@ async def verificar_reserva_creada(page: Page, bloque: dict):
     if not fecha_txt:
         return None
 
+    if not filas:
+        # No se pudo leer la tabla (no cargo, render distinto, paginacion).
+        # Devolver False aqui haria que el bot creyera que no hay reserva y
+        # volviera a intentar, pudiendo duplicarla. Mejor: desconocido.
+        log("    No se pudo leer la tabla de Seguimiento: resultado desconocido")
+        return None
+
     PALABRAS_ESTADO = ("pendiente", "aprobad", "confirmad", "activ",
                        "registrad", "rechaz", "cancel", "anulad")
 
@@ -1268,9 +1292,14 @@ async def intentar_reserva(usuario_key: str = "1"):
         log(f"  Configura SIMON_USUARIO_{usuario_key} y SIMON_PASSWORD_{usuario_key} en .env")
         return False
 
-    # El usuario que reserva cuenta como participante, asi que 9 cedulas + reservista = 10
-    if len(cedulas) < 9:
-        log(f"ADVERTENCIA: Solo hay {len(cedulas)} cedulas en grupo {usuario_key} (minimo 9, + el reservista = 10)")
+    # Quien reserva ya cuenta como participante
+    minimo = CONFIG.get("MIN_PARTICIPANTES", 10)
+    respaldo = CONFIG.get(f"CEDULAS_RESERVA_{usuario_key}", [])
+    if len(cedulas) + len(respaldo) + 1 < minimo:
+        log(f"ADVERTENCIA: grupo {usuario_key} tiene {len(cedulas)} cedulas "
+            f"+ {len(respaldo)} de respaldo + el reservista = "
+            f"{len(cedulas) + len(respaldo) + 1}, y SIMON exige {minimo}. "
+            f"Si alguna falla, la reserva no se podra guardar.")
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -1297,6 +1326,7 @@ async def intentar_reserva(usuario_key: str = "1"):
         """)
         context.set_default_timeout(CONFIG["DEFAULT_TIMEOUT_MS"])
         page = await context.new_page()
+        ERRORES_API.clear()   # cada usuario arranca con su propio historial
         _instalar_captura_errores(page)
 
         try:
@@ -1332,7 +1362,7 @@ async def intentar_reserva(usuario_key: str = "1"):
                     # Filtrar los deseados
                     deseados = await filtrar_bloques_deseados(bloques)
                     if not deseados:
-                        log(f"  Sin bloques en dias/horas deseados")
+                        log("  Sin bloques en dias/horas deseados")
                         continue
 
                     log(f"  Encontrados {len(deseados)} bloques deseados!")
@@ -1361,18 +1391,24 @@ async def intentar_reserva(usuario_key: str = "1"):
                         # Guardar
                         guard_ok = await guardar_reserva(page)
 
-                        if guard_ok:
-                            # Comprobacion real contra Seguimiento
-                            confirmada = await verificar_reserva_creada(page, bloque)
-                            if confirmada is False:
+                        # Se verifica SIEMPRE, incluso si guardar_reserva dijo
+                        # que fallo: SIMON puede devolver 500 y aun asi haber
+                        # creado la reserva. Sin esto el bot la duplicaria.
+                        confirmada = await verificar_reserva_creada(page, bloque)
+                        if confirmada is True:
+                            if not guard_ok:
+                                log("  Pese al error, la reserva SI quedo creada")
+                            guard_ok = True
+                        elif confirmada is False:
+                            if guard_ok:
                                 log("  SIMON no registro la reserva, se descarta")
-                                guard_ok = False
-                            elif confirmada is None:
-                                bloque["sin_verificar"] = True
+                            guard_ok = False
+                        else:
+                            bloque["sin_verificar"] = True
 
                         if guard_ok:
                             log(f"\n{'*'*60}")
-                            log(f"RESERVA EXITOSA!")
+                            log("RESERVA EXITOSA!")
                             log(f"  Escenario: {escenario}")
                             log(f"  Tercio: {tercio}")
                             log(f"  Bloque: {bloque.get('confirmado') or bloque.get('etiqueta', '?')}")
