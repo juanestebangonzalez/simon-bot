@@ -32,6 +32,15 @@ DETALLE_RESERVA = {"1": "", "2": ""}
 # Motivos por los que no se pudo completar (para el aviso de Telegram)
 PARTICIPANTES_FALTANTES = []
 
+# Fechas que ya quedaron reservadas en esta corrida.
+# Regla del grupo: una sola reserva por dia entre los dos usuarios, asi que
+# si el usuario 1 logra el lunes, el usuario 2 no puede volver a pedir el lunes.
+FECHAS_RESERVADAS = set()
+
+# Marca si a un usuario se le descarto algun bloque por esa regla,
+# para distinguir "no habia cupo" de "ya lo tenia el otro usuario".
+OMITIDO_POR_DIA = {"1": False, "2": False}
+
 # ── Helpers ───────────────────────────────────────────────────────────
 
 def quitar_tildes(texto: str) -> str:
@@ -522,13 +531,19 @@ async def buscar_bloques_disponibles(page: Page):
 DIAS_ES = ["Lunes", "Martes", "Miercoles", "Jueves", "Viernes", "Sabado", "Domingo"]
 
 
-async def filtrar_bloques_deseados(bloques: list):
+async def filtrar_bloques_deseados(bloques: list, usuario_key: str = ""):
     """
     Deja solo los bloques en los dias deseados y a partir de la hora minima,
     ordenados por preferencia de hora: 10pm > 9pm > 8pm.
+
+    Descarta tambien los dias que ya quedaron reservados en esta corrida:
+    el grupo solo quiere UNA reserva por dia, asi que si el usuario 1 ya
+    tomo el lunes, el usuario 2 no vuelve a pedir el lunes.
     """
     hora_min = int(str(CONFIG.get("HORA_MINIMA", "20:00")).split(":")[0])
+    una_por_dia = CONFIG.get("UNA_RESERVA_POR_DIA", True)
     deseados = []
+    descartados_por_dia = set()
 
     for b in bloques:
         try:
@@ -543,6 +558,11 @@ async def filtrar_bloques_deseados(bloques: list):
             continue
         if hora < hora_min:
             continue
+        if una_por_dia and b["fecha"] in FECHAS_RESERVADAS:
+            descartados_por_dia.add(b["fecha"])
+            if usuario_key:
+                OMITIDO_POR_DIA[usuario_key] = True
+            continue
 
         # Prioridad: entre mas tarde, mejor (10pm=1, 9pm=2, 8pm=3...)
         b["prioridad"] = max(1, 23 - hora)
@@ -551,6 +571,9 @@ async def filtrar_bloques_deseados(bloques: list):
         deseados.append(b)
 
     deseados.sort(key=lambda x: (x["prioridad"], x["fecha"]))
+
+    for f in sorted(descartados_por_dia):
+        log(f"  {f} se omite: ya hay una reserva de ese dia en esta corrida")
 
     if deseados:
         log(f"  Bloques que cumplen (mejor primero): "
@@ -1360,7 +1383,7 @@ async def intentar_reserva(usuario_key: str = "1"):
                         continue
 
                     # Filtrar los deseados
-                    deseados = await filtrar_bloques_deseados(bloques)
+                    deseados = await filtrar_bloques_deseados(bloques, usuario_key)
                     if not deseados:
                         log("  Sin bloques en dias/horas deseados")
                         continue
@@ -1407,6 +1430,8 @@ async def intentar_reserva(usuario_key: str = "1"):
                             bloque["sin_verificar"] = True
 
                         if guard_ok:
+                            if bloque.get("fecha"):
+                                FECHAS_RESERVADAS.add(bloque["fecha"])
                             log(f"\n{'*'*60}")
                             log("RESERVA EXITOSA!")
                             log(f"  Escenario: {escenario}")
@@ -1461,24 +1486,31 @@ async def verificar_y_reservar():
     log(f"Fecha: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     log("="*60)
 
-    # Usuario 1
-    log("\n>>> USUARIO 1 <<<")
-    ok1 = await intentar_reserva("1")
-    if ok1:
-        log("Usuario 1: Reserva exitosa!")
-    else:
-        log("Usuario 1: No se pudo reservar")
+    resultados = {}
+    for clave in ("1", "2"):
+        log(f"\n>>> USUARIO {clave} <<<")
+        ok = await intentar_reserva(clave)
+        resultados[clave] = ok
+        if ok:
+            log(f"Usuario {clave}: Reserva exitosa!")
+        elif OMITIDO_POR_DIA[clave]:
+            log(f"Usuario {clave}: omitido, ese dia ya quedo reservado "
+                f"por el otro usuario")
+        else:
+            log(f"Usuario {clave}: No se pudo reservar")
 
-    # Usuario 2
-    log("\n>>> USUARIO 2 <<<")
-    ok2 = await intentar_reserva("2")
-    if ok2:
-        log("Usuario 2: Reserva exitosa!")
-    else:
-        log("Usuario 2: No se pudo reservar")
+    ok1, ok2 = resultados["1"], resultados["2"]
+
+    def _estado(clave, ok):
+        if ok:
+            return "OK"
+        return "OMITIDO" if OMITIDO_POR_DIA[clave] else "FALLO"
 
     log("\n" + "="*60)
-    log(f"Resultado final: Usuario1={'OK' if ok1 else 'FALLO'} | Usuario2={'OK' if ok2 else 'FALLO'}")
+    log(f"Resultado final: Usuario1={_estado('1', ok1)} | "
+        f"Usuario2={_estado('2', ok2)}")
+    if FECHAS_RESERVADAS:
+        log(f"Dias reservados en esta corrida: {', '.join(sorted(FECHAS_RESERVADAS))}")
     log("="*60)
 
     # ── Aviso por Telegram (nunca debe tumbar el bot) ──
@@ -1490,8 +1522,10 @@ async def verificar_y_reservar():
                     if not DETALLE_RESERVA[k]:
                         DETALLE_RESERVA[k] = motivo
             telegram_notify.reportar([
-                {"usuario": "1", "ok": ok1, "detalle": DETALLE_RESERVA["1"]},
-                {"usuario": "2", "ok": ok2, "detalle": DETALLE_RESERVA["2"]},
+                {"usuario": "1", "ok": ok1, "detalle": DETALLE_RESERVA["1"],
+                 "omitido": OMITIDO_POR_DIA["1"] and not ok1},
+                {"usuario": "2", "ok": ok2, "detalle": DETALLE_RESERVA["2"],
+                 "omitido": OMITIDO_POR_DIA["2"] and not ok2},
             ])
         except Exception as e:
             log(f"[telegram] fallo el aviso: {type(e).__name__}: {e}")

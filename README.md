@@ -15,11 +15,17 @@ el mejor bloque disponible para cada usuario.
 | Horario | prioridad 10pm, luego 9pm, luego 8pm |
 | Tercios | 1, 2 y 3 en ese orden |
 | Participantes | 9 cedulas + quien reserva = 10 (minimo de SIMON) |
+| Una por dia | si el usuario 1 aparta un dia, el 2 no repite ese dia |
 | Aviso | mensaje de Telegram con el resultado |
 
 Como SIMON solo deja reservar con 2 dias de anticipacion, el cron corre
 **viernes** (para el lunes) y **lunes** (para el jueves), a las 00:01
 hora Colombia.
+
+El usuario 2 funciona como **respaldo del usuario 1**, no como una segunda
+reserva: si el 1 ya aparto el lunes, el 2 solo intenta otro dia, y si no hay
+otro dia se reporta como "No aplica" (no como fallo). Para desactivarlo,
+poner `UNA_RESERVA_POR_DIA` en `False` en `config.py`.
 
 ## Archivos
 

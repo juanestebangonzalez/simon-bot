@@ -66,21 +66,31 @@ def reportar(resultados):
     """
     resultados: lista de dicts como
       {"usuario": "1", "ok": True, "detalle": "Moravia | Tercio 1 | Lun 12/10 10:00 PM"}
+
+    "omitido": True marca al usuario que no reservo porque ese dia ya lo
+    tomo el otro (regla de una sola reserva por dia). Eso no es un fallo.
     """
     ahora = datetime.now().strftime("%d/%m/%Y %H:%M")
     hubo_exito = any(r.get("ok") for r in resultados)
+    # Solo es fallo si alguien no reservo y tampoco fue por la regla del dia
+    hubo_fallo = any(not r.get("ok") and not r.get("omitido") for r in resultados)
+
     cabecera = "✅ <b>RESERVA SIMON</b>" if hubo_exito else "❌ <b>RESERVA SIMON</b>"
 
     lineas = [cabecera, f"<i>{ahora}</i>", ""]
     for r in resultados:
-        icono = "✅" if r.get("ok") else "❌"
-        estado = "Reservado" if r.get("ok") else "Sin cupo / fallo"
+        if r.get("ok"):
+            icono, estado = "✅", "Reservado"
+        elif r.get("omitido"):
+            icono, estado = "➖", "No aplica (ese dia ya quedo reservado)"
+        else:
+            icono, estado = "❌", "Sin cupo / fallo"
         lineas.append(f"{icono} <b>Usuario {r.get('usuario')}</b>: {estado}")
         detalle = r.get("detalle")
         if detalle:
             lineas.append(f"   <code>{detalle}</code>")
 
-    if not hubo_exito:
+    if hubo_fallo:
         lineas += ["", "Revisa los logs del servidor para el detalle."]
 
     return enviar("\n".join(lineas))

@@ -82,6 +82,12 @@ CONFIG = {
         
     ],
 
+    # ── Una sola reserva por dia ───────────────────────────────────────
+    # El grupo juega una vez por dia: si el usuario 1 ya aparto un tercio
+    # para el lunes, el usuario 2 no debe reservar tambien el lunes.
+    # Con esto el usuario 2 queda como respaldo del 1, no como duplicado.
+    "UNA_RESERVA_POR_DIA": True,
+
     # ── Participantes de respaldo ──────────────────────────────────────
     # SIMON exige minimo 10 participantes (incluido quien reserva).
     # Si alguna cedula del grupo falla (no esta registrada en SIMON,
