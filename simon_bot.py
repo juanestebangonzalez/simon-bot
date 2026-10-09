@@ -23,6 +23,17 @@ from playwright.async_api import async_playwright, Page, TimeoutError as PwTimeo
 
 from config import CONFIG
 
+try:
+    import telegram_notify
+except Exception:  # pragma: no cover
+    telegram_notify = None
+
+# Detalle de la reserva lograda por cada usuario (para el aviso de Telegram)
+DETALLE_RESERVA = {"1": "", "2": ""}
+
+# Motivos por los que no se pudo completar (para el aviso de Telegram)
+PARTICIPANTES_FALTANTES = []
+
 # ── Helpers ───────────────────────────────────────────────────────────
 
 def quitar_tildes(texto: str) -> str:
@@ -362,470 +373,726 @@ async def seleccionar_tercio(page: Page, tercio: str):
 
 async def buscar_bloques_disponibles(page: Page):
     """
-    Busca bloques verdes (disponibles) en el calendario FullCalendar.
-    Retorna lista de bloques con info: {titulo, fecha, hora_inicio, hora_fin, elemento_id}
+    Lee los bloques del calendario FullCalendar directamente del DOM.
+
+    Estructura real de SIMON:
+      td.fc-timegrid-col[data-date="2026-10-12"]
+        a.fc-event.bg-primary  -> Bloque Disponible (verde)
+        a.fc-event.bg-error    -> Bloque Ocupado (magenta)
+          .fc-event-time  = "09:00 PM - 10:00 PM"
+          .fc-event-title = "Bloque Disponible"
+
+    Retorna: [{fecha, hora, minuto, tiempo, titulo}]
     """
     log("  Buscando bloques disponibles en el calendario...")
 
-    # Los bloques disponibles son eventos de FullCalendar con fondo verde
-    # Pueden ser .fc-event, .fc-timegrid-event, .fc-bg-event
     bloques = await page.evaluate("""() => {
-        const results = [];
+        const out = [];
+        const cols = document.querySelectorAll('td.fc-timegrid-col[data-date]');
+        for (const col of cols) {
+            const fecha = col.getAttribute('data-date');
+            for (const ev of col.querySelectorAll('a.fc-event')) {
+                const titulo = (ev.querySelector('.fc-event-title')?.textContent || '').trim();
+                const tiempo = (ev.querySelector('.fc-event-time')?.textContent || '').trim();
+                const norm = titulo.normalize('NFD')
+                    .replace(/[\\u0300-\\u036f]/g, '').toLowerCase();
 
-        // Buscar todos los eventos del calendario
-        const eventos = document.querySelectorAll(
-            '.fc-event, .fc-timegrid-event, .fc-bg-event, .fc-timegrid-bg-harness'
-        );
+                if (norm.includes('ocupado')) continue;
+                if (!norm.includes('disponible')) continue;
+                if (ev.classList.contains('bg-error')) continue;
 
-        for (const ev of eventos) {
-            const style = window.getComputedStyle(ev);
-            const bg = style.backgroundColor;
-            const text = ev.textContent?.trim() || '';
+                const m = tiempo.match(/(\\d{1,2}):(\\d{2})\\s*(AM|PM)/i);
+                if (!m) continue;
+                let h = parseInt(m[1], 10);
+                const min = parseInt(m[2], 10);
+                const ampm = m[3].toUpperCase();
+                if (ampm === 'PM' && h !== 12) h += 12;
+                if (ampm === 'AM' && h === 12) h = 0;
 
-            // Detectar bloques verdes (disponibles)
-            const isGreen = bg.includes('0, 128') || bg.includes('76, 175') ||
-                           bg.includes('0, 200') || bg.includes('34, 139') ||
-                           bg.includes('46, 125') || bg.includes('56, 142') ||
-                           bg.includes('67, 160') || bg.includes('72, 199') ||
-                           bg.includes('0, 150') || bg.includes('0, 100') ||
-                           ev.style.backgroundColor?.includes('green') ||
-                           ev.classList.contains('disponible') ||
-                           ev.classList.contains('available');
-
-            // Tambien verificar por atributos de datos
-            const dataset = ev.dataset || {};
-            const isAvailable = dataset.status === 'available' ||
-                               dataset.disponible === 'true' ||
-                               text.toLowerCase().includes('disponible');
-
-            // Solo agregar bloques VERDES / DISPONIBLES (no magenta/ocupados)
-            const textoLower = text.toLowerCase();
-            const esDisponible = textoLower.includes('disponible');
-            const esOcupado = textoLower.includes('ocupado');
-
-            if (isGreen || isAvailable || (esDisponible && !esOcupado)) {
-                const rect = ev.getBoundingClientRect();
-                const fcEvent = ev.closest('.fc-event');
-                const timeEl = ev.querySelector('.fc-event-time');
-                const titleEl = ev.querySelector('.fc-event-title');
-
-                results.push({
-                    text: text.substring(0, 100),
-                    bg: bg,
-                    isGreen: isGreen,
-                    isAvailable: true,
-                    top: rect.top,
-                    left: rect.left,
-                    width: rect.width,
-                    height: rect.height,
-                    className: ev.className.substring(0, 200),
-                    style_bg: ev.style.backgroundColor,
-                    time: timeEl?.textContent || '',
-                    title: titleEl?.textContent || '',
-                    dataAttributes: JSON.stringify(dataset).substring(0, 200)
-                });
+                out.push({fecha: fecha, hora: h, minuto: min,
+                          tiempo: tiempo, titulo: titulo.replace(/\\s+/g, ' ')});
             }
         }
-
-        // Tambien intentar a traves de la API de FullCalendar
-        const fcEl = document.querySelector('.fc');
-        if (fcEl) {
-            const fiberKey = Object.keys(fcEl).find(k =>
-                k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$')
-            );
-            let fiber = fcEl[fiberKey];
-            let calApi = null;
-            let attempts = 0;
-            while (fiber && attempts < 30) {
-                if (fiber.stateNode?.getApi) {
-                    calApi = fiber.stateNode.getApi();
-                    break;
-                }
-                fiber = fiber.return;
-                attempts++;
-            }
-            if (calApi) {
-                const events = calApi.getEvents();
-                for (const e of events) {
-                    const titulo = (e.title || '').toLowerCase();
-                    const tituloNorm = titulo.normalize('NFD').replace(/[̀-ͯ]/g, '');
-                    // Solo agregar bloques disponibles (no ocupados)
-                    const esOcupado = tituloNorm.includes('ocupado');
-                    const esDisponible = tituloNorm.includes('disponible');
-                    const bgColor = (e.backgroundColor || '').toLowerCase();
-                    const esVerde = bgColor.includes('green') || bgColor.includes('#4caf50') ||
-                                    bgColor.includes('#2e7d32') || bgColor.includes('#66bb6a');
-
-                    if (esDisponible || esVerde || !esOcupado) {
-                        // Si tiene "Ocupado" en el titulo, saltarlo
-                        if (esOcupado) continue;
-                        results.push({
-                            source: 'api',
-                            title: e.title,
-                            start: e.start?.toISOString(),
-                            end: e.end?.toISOString(),
-                            bg: e.backgroundColor,
-                            allDay: e.allDay,
-                            isAvailable: true,
-                            extendedProps: JSON.stringify(e.extendedProps).substring(0, 200)
-                        });
-                    }
-                }
-            }
-        }
-
-        return results;
+        return out;
     }""")
 
     if not bloques:
-        log("  No se encontraron bloques DISPONIBLES en el calendario")
-        log("  (Todos los bloques estan ocupados o no hay bloques)")
+        log("  No hay bloques DISPONIBLES en este tercio")
     else:
-        log(f"  Se encontraron {len(bloques)} bloques DISPONIBLES (verdes)")
+        log(f"  Se encontraron {len(bloques)} bloques DISPONIBLES:")
         for b in bloques:
-            log(f"    - {b.get('text') or b.get('title', '?')} | bg={b.get('bg')}")
+            log(f"    - {b['fecha']} {b['tiempo']}")
 
     return bloques
 
 
+DIAS_ES = ["Lunes", "Martes", "Miercoles", "Jueves", "Viernes", "Sabado", "Domingo"]
+
+
 async def filtrar_bloques_deseados(bloques: list):
     """
-    Filtra bloques que sean:
-    - En dias deseados (lunes, martes, jueves)
-    - Despues de las 8pm
-    - Disponibles (verdes)
-    Prioridad de horario: 10pm > 9pm > 8pm
+    Deja solo los bloques en los dias deseados y a partir de la hora minima,
+    ordenados por preferencia de hora: 10pm > 9pm > 8pm.
     """
+    hora_min = int(str(CONFIG.get("HORA_MINIMA", "20:00")).split(":")[0])
     deseados = []
+
     for b in bloques:
-        # Doble verificacion: rechazar cualquier bloque con "Ocupado" en el texto
-        texto_bloque = quitar_tildes(
-            (b.get("text") or "") + " " + (b.get("title") or "")
-        ).lower()
-        if "ocupado" in texto_bloque:
+        try:
+            fecha = datetime.strptime(b["fecha"], "%Y-%m-%d")
+        except (ValueError, KeyError, TypeError):
             continue
 
-        # Si viene de la API de FullCalendar
-        start_str = b.get("start")
-        if start_str:
-            try:
-                start = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
-                dia_semana = start.weekday()  # 0=Mon, 1=Tue, 3=Thu
-                hora = start.hour
+        dia = fecha.weekday()  # 0=lunes ... 6=domingo
+        hora = b.get("hora", 0)
 
-                es_dia_deseado = dia_semana in CONFIG["DIAS_DESEADOS"]
-                es_hora_deseada = hora >= 20  # >= 8pm
+        if dia not in CONFIG["DIAS_DESEADOS"]:
+            continue
+        if hora < hora_min:
+            continue
 
-                if es_dia_deseado and es_hora_deseada:
-                    # Prioridad por hora: 22 (10pm)=1, 21 (9pm)=2, 20 (8pm)=3
-                    if hora >= 22:
-                        b["prioridad"] = 1   # 10pm - maxima prioridad
-                    elif hora >= 21:
-                        b["prioridad"] = 2   # 9pm
-                    else:
-                        b["prioridad"] = 3   # 8pm
-                    deseados.append(b)
-                elif es_dia_deseado:
-                    b["prioridad"] = 4
-                    deseados.append(b)
-            except (ValueError, TypeError):
-                pass
+        # Prioridad: entre mas tarde, mejor (10pm=1, 9pm=2, 8pm=3...)
+        b["prioridad"] = max(1, 23 - hora)
+        b["dia_nombre"] = DIAS_ES[dia]
+        b["etiqueta"] = f"{DIAS_ES[dia]} {fecha.strftime('%d/%m')} {b.get('tiempo', '')}"
+        deseados.append(b)
 
-        # Si tiene indicadores de verde/disponible, incluirlo para revision
-        if b.get("isGreen") or b.get("isAvailable"):
-            if b not in deseados:
-                b["prioridad"] = 5
-                deseados.append(b)
+    deseados.sort(key=lambda x: (x["prioridad"], x["fecha"]))
 
-    deseados.sort(key=lambda x: x.get("prioridad", 99))
+    if deseados:
+        log(f"  Bloques que cumplen (mejor primero): "
+            f"{', '.join(d['etiqueta'] for d in deseados)}")
     return deseados
 
 
 # ── Paso 5: Hacer clic en un bloque disponible ───────────────────────
 
 async def click_bloque(page: Page, bloque: dict):
-    """Hace clic en un bloque disponible del calendario"""
-    log(f"  Haciendo clic en bloque: {bloque.get('title') or bloque.get('text', '?')}")
+    """
+    Hace clic EXACTAMENTE en el bloque indicado (fecha + hora), no en el primero
+    de la lista. Marca el elemento con un atributo para poder ubicarlo con
+    Playwright y que el clic sea un clic real del navegador.
+    """
+    etiqueta = bloque.get("etiqueta") or f"{bloque.get('fecha')} {bloque.get('tiempo')}"
+    log(f"  Haciendo clic en bloque: {etiqueta}")
 
-    if bloque.get("source") == "api":
-        # Si vino de la API, buscar el elemento visual correspondiente
-        start = bloque.get("start", "")
-        clicked = await page.evaluate("""(startStr) => {
-            const fcEl = document.querySelector('.fc');
-            const fiberKey = Object.keys(fcEl).find(k =>
-                k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$')
-            );
-            let fiber = fcEl[fiberKey];
-            let calApi = null;
-            let attempts = 0;
-            while (fiber && attempts < 30) {
-                if (fiber.stateNode?.getApi) {
-                    calApi = fiber.stateNode.getApi();
-                    break;
-                }
-                fiber = fiber.return;
-                attempts++;
+    marcado = await page.evaluate("""(b) => {
+        document.querySelectorAll('[data-bot-target]')
+            .forEach(e => e.removeAttribute('data-bot-target'));
+        const col = document.querySelector(
+            'td.fc-timegrid-col[data-date="' + b.fecha + '"]'
+        );
+        if (!col) return false;
+        for (const ev of col.querySelectorAll('a.fc-event')) {
+            const tiempo = (ev.querySelector('.fc-event-time')?.textContent || '').trim();
+            if (tiempo === b.tiempo) {
+                ev.setAttribute('data-bot-target', '1');
+                ev.scrollIntoView({block: 'center'});
+                return true;
             }
-            if (!calApi) return false;
+        }
+        return false;
+    }""", bloque)
 
-            const events = calApi.getEvents();
-            for (const e of events) {
-                if (e.start?.toISOString() === startStr) {
-                    const els = document.querySelectorAll('.fc-event');
-                    for (const el of els) {
-                        el.click();
-                        return true;
-                    }
-                }
+    if not marcado:
+        log("    ERROR: No se pudo ubicar el bloque en el calendario")
+        await debug_screenshot(page, "06_bloque_no_ubicado")
+        return False
+
+    await page.wait_for_timeout(400)
+    try:
+        await page.locator('[data-bot-target="1"]').click(timeout=10000)
+    except Exception as e:
+        log(f"    Clic normal fallo ({type(e).__name__}), usando JavaScript...")
+        await page.evaluate(
+            """() => document.querySelector('[data-bot-target="1"]')?.click()"""
+        )
+
+    await page.wait_for_timeout(1500)
+    await debug_screenshot(page, "06b_bloque_clickeado")
+    return True
+
+
+
+# ── Paso 5b: Panel lateral "Creacion de Reserva" ──────────────────────
+
+# Utilidades JS compartidas. Estructura real del panel de SIMON:
+#   .MuiDrawer-paper  (titulo h6 = "Creacion de Reserva")
+#     Fecha Inicio / Fecha Fin / Hora Inicio / Hora Fin  -> deshabilitados,
+#       los prellena SIMON con el bloque que se clickeo
+#     boton "Agregar Participantes"  -> abre el dialogo de participantes
+#     tabla con los participantes ya agregados
+#     botones "Guardar" y "Cancelar"
+JS_UTILES = """
+  const norm = (t) => (t || '').normalize('NFD')
+      .replace(/[\\u0300-\\u036f]/g, '').replace(/\\s+/g, ' ').trim().toLowerCase();
+  const visible = (e) => {
+      if (!e) return false;
+      const s = window.getComputedStyle(e);
+      return s.visibility !== 'hidden' && s.display !== 'none'
+          && e.getClientRects().length > 0;
+  };
+  const drawer = () => {
+      for (const p of document.querySelectorAll('.MuiDrawer-paper')) {
+          if (!visible(p)) continue;
+          const h = norm(p.querySelector('h6')?.textContent);
+          if (h.includes('creacion de reserva')) return p;
+      }
+      return null;
+  };
+  const dialogo = () => {
+      const ds = [...document.querySelectorAll('.MuiDialog-paper')].filter(visible);
+      return ds.length ? ds[ds.length - 1] : null;
+  };
+  const boton = (raiz, nombres) => {
+      if (!raiz) return null;
+      for (const n of nombres) {
+          for (const b of raiz.querySelectorAll('button')) {
+              if (!visible(b) || b.disabled) continue;
+              if (norm(b.textContent) === n) return b;
+          }
+      }
+      for (const n of nombres) {
+          for (const b of raiz.querySelectorAll('button')) {
+              if (!visible(b) || b.disabled) continue;
+              if (norm(b.textContent).includes(n)) return b;
+          }
+      }
+      return null;
+  };
+  const toast = () => {
+      const t = document.querySelector('.react-hot-toast');
+      return t ? (t.textContent || '').trim() : '';
+  };
+"""
+
+
+async def _js(page: Page, cuerpo: str, args=None):
+    """Ejecuta JS con las utilidades de arriba ya disponibles."""
+    return await page.evaluate("(args) => {" + JS_UTILES + cuerpo + "}", args)
+
+
+async def inspeccionar_formulario(page: Page, etiqueta: str = "inspeccion"):
+    """Vuelca al log los campos y botones visibles (para descubrir selectores)."""
+    datos = await _js(page, """
+        const etiquetaDe = (i) => {
+            if (i.id) {
+                const l = document.querySelector('label[for="' + CSS.escape(i.id) + '"]');
+                if (l) return (l.textContent || '').trim();
             }
-            return false;
-        }""", start)
-        return clicked
-    else:
-        # Clic directo en las coordenadas del bloque
-        x = bloque.get("left", 0) + bloque.get("width", 0) / 2
-        y = bloque.get("top", 0) + bloque.get("height", 0) / 2
-        if x > 0 and y > 0:
-            await page.mouse.click(x, y)
-            return True
-    return False
+            const w = i.closest('.MuiFormControl-root, .MuiTextField-root');
+            return w ? (w.querySelector('label')?.textContent || '').trim() : '';
+        };
+        const zona = dialogo() || drawer() || document.body;
+        const inputs = [];
+        zona.querySelectorAll('input, textarea, select').forEach(i => {
+            if (!visible(i)) return;
+            inputs.push({
+                name: i.name || '', role: i.getAttribute('role') || '',
+                placeholder: i.placeholder || '', label: etiquetaDe(i),
+                disabled: i.disabled, value: (i.value || '').substring(0, 30)
+            });
+        });
+        const botones = [];
+        zona.querySelectorAll('button').forEach(b => {
+            if (!visible(b)) return;
+            const t = (b.textContent || '').trim();
+            if (t) botones.push(t.substring(0, 30) + (b.disabled ? '(off)' : ''));
+        });
+        const donde = dialogo() ? 'dialogo' : (drawer() ? 'panel' : 'pagina');
+        return {inputs, botones, donde};
+    """)
+
+    log(f"  [{etiqueta}] zona: {datos['donde']}")
+    for i in datos["inputs"]:
+        log(f"    campo: label='{i['label']}' name='{i['name']}' role='{i['role']}' "
+            f"ph='{i['placeholder']}' valor='{i['value']}'{' [off]' if i['disabled'] else ''}")
+    log(f"    botones: {', '.join(datos['botones']) or '(ninguno)'}")
+    return datos
+
+
+async def agregar_bloque_drawer(page: Page, bloque: dict):
+    """
+    Verifica que el panel 'Creacion de Reserva' se abrio y quedo prellenado
+    con el bloque correcto. SIMON llena fecha y hora solo (campos deshabilitados),
+    asi que aqui no hay nada que escribir: solo comprobar.
+    """
+    log("  Esperando panel 'Creacion de Reserva'...")
+
+    datos = None
+    for _ in range(24):  # hasta ~12 s
+        datos = await _js(page, """
+            const d = drawer();
+            if (!d) return null;
+            const campos = {};
+            d.querySelectorAll('input').forEach(i => {
+                let lab = '';
+                if (i.id) {
+                    lab = (document.querySelector(
+                        'label[for="' + CSS.escape(i.id) + '"]')?.textContent || '');
+                }
+                campos[norm(lab) || i.name] = (i.value || '').trim();
+            });
+            return {campos: campos, participantes: d.querySelectorAll('tbody tr').length};
+        """)
+        if datos:
+            break
+        await page.wait_for_timeout(500)
+
+    if not datos:
+        log("    ERROR: El panel 'Creacion de Reserva' no se abrio")
+        await debug_screenshot(page, "06c_sin_drawer")
+        return False
+
+    await debug_screenshot(page, "06c_drawer_abierto")
+    for k, v in datos["campos"].items():
+        log(f"    {k}: {v}")
+    log(f"    Participantes ya en la tabla: {datos['participantes']}")
+
+    hora_ini = datos["campos"].get("hora inicio", "")
+    if not hora_ini:
+        log("    ERROR: El panel no quedo prellenado con la hora")
+        await inspeccionar_formulario(page, "drawer_vacio")
+        return False
+
+    # Guardar lo que SIMON realmente reservo (puede diferir de lo pedido)
+    fecha = datos["campos"].get("fecha inicio", "")
+    bloque["confirmado"] = f"{fecha} {hora_ini} - {datos['campos'].get('hora fin', '')}"
+    log(f"    Bloque confirmado por SIMON: {bloque['confirmado']}")
+    return True
 
 
 # ── Paso 6: Agregar participantes ─────────────────────────────────────
 
-async def agregar_participante_uno(page: Page, cedula: str, indice: int, total: int):
-    """
-    Agrega UN participante al formulario de reserva.
-    Flujo: Tipo de documento → Numero de cedula → Buscar
-    Retorna True si se agrego exitosamente.
-    """
-    log(f"  Agregando cedula {indice}/{total}: {cedula}")
+async def _cerrar_panel(page: Page):
+    """Cierra el panel/dialogo abierto para poder reintentar con otro bloque."""
+    await _js(page, """
+        const d = dialogo();
+        if (d) { const b = boton(d, ['cancelar', 'cerrar']); if (b) b.click(); }
+        const dr = drawer();
+        if (dr) { const b = boton(dr, ['cancelar']); if (b) b.click(); }
+        return true;
+    """)
+    await page.wait_for_timeout(1500)
 
-    # Scroll al area de participantes (parte inferior del formulario)
-    await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-    await page.wait_for_timeout(500)
 
-    # ── 1. Seleccionar tipo de documento (Cedula de Ciudadania) ──
-    # Buscar el combobox de tipo de documento en el area de participantes
-    # Puede haber varios comboboxes en la pagina; buscamos el del formulario de participantes
-    combos = page.locator('input[role="combobox"]:visible')
-    combo_count = await combos.count()
-
-    tipo_combo = None
-    if combo_count > 0:
-        # Si hay multiples comboboxes, usar el ultimo visible (el de participantes)
-        # El primero suele ser el de tercios/division
-        tipo_combo = combos.last
-        # Verificar si el valor ya es "Cedula de Ciudadania"
-        valor_actual = await tipo_combo.input_value()
-        valor_norm = quitar_tildes(valor_actual).lower() if valor_actual else ""
-
-        if "cedula" in valor_norm and "ciudadan" in valor_norm:
-            log(f"    Tipo doc ya seleccionado: {valor_actual}")
-        else:
-            # Seleccionar tipo de documento
-            await tipo_combo.click()
-            await page.wait_for_timeout(300)
-            await tipo_combo.fill("")
-            await page.wait_for_timeout(200)
-            await tipo_combo.fill("Cedula")
-            await page.wait_for_timeout(800)
-
-            # Seleccionar opcion con normalizacion de acentos (igual que login)
-            selected = await page.evaluate("""() => {
-                const options = document.querySelectorAll('[role="option"]');
-                for (const opt of options) {
-                    const text = opt.textContent
-                        .normalize('NFD').replace(/[\\u0300-\\u036f]/g, '')
-                        .toLowerCase();
-                    if (text.includes('cedula') && text.includes('ciudadan')) {
-                        opt.click();
-                        return true;
-                    }
-                }
-                return false;
-            }""")
-
-            if not selected:
-                # Fallback con teclado
-                await tipo_combo.press("ArrowDown")
-                await page.wait_for_timeout(200)
-                await tipo_combo.press("Enter")
-
-            await page.keyboard.press("Escape")
-            await page.wait_for_timeout(500)
-
-            valor_tipo = await tipo_combo.input_value()
-            log(f"    Tipo doc: {valor_tipo}")
-    else:
-        log("    ADVERTENCIA: No se encontro combobox de tipo documento para participante")
-
-    # ── 2. Ingresar numero de cedula ──
-    # Buscar campo de numero de documento/cedula
-    doc_input = None
-
-    # Intentar por placeholder
-    placeholders = [
-        'input[placeholder*="1020304050"]:visible',
-        'input[placeholder*="documento" i]:visible',
-        'input[placeholder*="cedula" i]:visible',
-        'input[placeholder*="numero" i]:visible',
-        'input[placeholder*="identificacion" i]:visible',
-    ]
-    for sel in placeholders:
-        loc = page.locator(sel).last  # .last para tomar el del area de participantes
-        if await loc.count() > 0:
-            doc_input = loc
-            break
-
-    if not doc_input:
-        # Fallback: buscar inputs de texto visibles que no sean combobox ni search
-        all_text = page.locator(
-            'input[type="text"]:visible:not([role="combobox"]):not([type="search"])'
-        )
-        cnt = await all_text.count()
-        if cnt > 0:
-            doc_input = all_text.last
-
-    if not doc_input:
-        log("    ERROR: No se encontro campo para ingresar cedula")
-        await debug_screenshot(page, f"08_sin_campo_cedula_{indice}")
+async def _abrir_dialogo_participantes(page: Page):
+    """Pulsa 'Agregar Participantes' dentro del panel si el dialogo no esta abierto."""
+    estado = await _js(page, """
+        if (dialogo()) return 'ya_abierto';
+        const b = boton(drawer(), ['agregar participantes', 'agregar participante']);
+        if (!b) return 'sin_boton';
+        b.click();
+        return 'abierto';
+    """)
+    if estado == "sin_boton":
         return False
-
-    # Limpiar y llenar
-    await doc_input.click()
-    await page.wait_for_timeout(200)
-
-    try:
-        await doc_input.fill(str(cedula))
-        await page.wait_for_timeout(300)
-        val = await doc_input.input_value()
-        if not val:
-            raise ValueError("Campo vacio")
-    except Exception:
-        # Fallback con JavaScript (por si hay maxlength=0 como en login)
-        log("    Usando JavaScript para ingresar cedula...")
-        await page.evaluate("""(args) => {
-            const {cedula, placeholders} = args;
-            let input = null;
-            for (const ph of placeholders) {
-                input = document.querySelector('input[placeholder*="' + ph + '"]');
-                if (input) break;
-            }
-            if (!input) {
-                const all = document.querySelectorAll(
-                    'input[type="text"]:not([role="combobox"])'
-                );
-                input = all[all.length - 1];
-            }
-            if (input) {
-                input.removeAttribute('maxlength');
-                input.removeAttribute('minlength');
-                input.removeAttribute('pattern');
-                const setter = Object.getOwnPropertyDescriptor(
-                    window.HTMLInputElement.prototype, 'value'
-                ).set;
-                setter.call(input, cedula);
-                input.dispatchEvent(new Event('input', {bubbles: true}));
-                input.dispatchEvent(new Event('change', {bubbles: true}));
-            }
-        }""", {"cedula": str(cedula), "placeholders": ["1020304050", "documento", "cedula"]})
-        await page.wait_for_timeout(500)
-
-    # ── 3. Clic en "Buscar" ──
-    buscar_btn = page.locator('button:has-text("Buscar"):visible').first
-    buscar_count = await buscar_btn.count()
-
-    if buscar_count > 0:
-        try:
-            await buscar_btn.click(timeout=5000)
-            log(f"    Clic en Buscar")
-        except Exception as e:
-            log(f"    ADVERTENCIA: Error al hacer clic en Buscar: {e}")
-            # Fallback: usar JavaScript click
-            await page.evaluate("""() => {
-                const btns = document.querySelectorAll('button');
-                for (const b of btns) {
-                    const txt = b.textContent.normalize('NFD')
-                        .replace(/[\\u0300-\\u036f]/g, '').toLowerCase();
-                    if (txt.includes('buscar') && b.offsetParent !== null) {
-                        b.click();
-                        return true;
-                    }
-                }
-                return false;
-            }""")
-    else:
-        # Intentar con "Agregar" o Enter
-        agregar_btn = page.locator('button:has-text("Agregar"):visible').first
-        if await agregar_btn.count() > 0:
-            await agregar_btn.click(timeout=5000)
-            log(f"    Clic en Agregar")
-        else:
-            await doc_input.press("Enter")
-            log(f"    Presionando Enter")
-
-    # Esperar a que se procese
-    await page.wait_for_timeout(2000)
-    await debug_screenshot(page, f"08_participante_{indice}")
+    if estado == "abierto":
+        await page.wait_for_timeout(1500)
     return True
 
 
-async def agregar_participantes(page: Page, cedulas: list):
+async def agregar_participante_uno(page: Page, cedula: str, indice: int, total: int):
     """
-    Agrega todos los participantes al formulario de reserva.
-    Para cada uno: Tipo doc → Cedula → Buscar
+    Agrega UN participante dentro del dialogo de participantes.
+    Flujo: tipo de documento -> numero -> Buscar/Agregar.
+
+    Nunca toca el combobox 'Selecciona la division a reservar' ni los campos
+    de fecha/hora: se trabaja solo dentro del dialogo o del panel.
     """
-    log(f"  Agregando {len(cedulas)} participantes...")
-    await page.wait_for_timeout(2000)
+    log(f"  Agregando cedula {indice}/{total}: {cedula}")
+
+    if not await _abrir_dialogo_participantes(page):
+        log("    ERROR: No aparece el boton 'Agregar Participantes'")
+        await inspeccionar_formulario(page, f"sin_boton_participantes_{indice}")
+        await debug_screenshot(page, f"08_sin_boton_participantes_{indice}")
+        return False
+
+    # Marcar los campos del dialogo (o del panel si no hay dialogo)
+    campos = await _js(page, """
+        document.querySelectorAll('[data-bot-doc],[data-bot-tipo]').forEach(
+            e => { e.removeAttribute('data-bot-doc'); e.removeAttribute('data-bot-tipo'); });
+
+        const zona = dialogo() || drawer();
+        if (!zona) return {doc: false, tipo: false};
+
+        const etiquetaDe = (i) => {
+            if (i.id) {
+                const l = document.querySelector('label[for="' + CSS.escape(i.id) + '"]');
+                if (l) return norm(l.textContent);
+            }
+            const w = i.closest('.MuiFormControl-root, .MuiTextField-root');
+            return w ? norm(w.querySelector('label')?.textContent) : '';
+        };
+
+        let doc = false, tipo = false;
+        for (const i of zona.querySelectorAll('input')) {
+            if (!visible(i) || i.disabled) continue;
+            const lab = etiquetaDe(i);
+            const ph = norm(i.placeholder);
+            if (lab.includes('division') || lab.includes('fecha') || lab.includes('hora')) continue;
+
+            if (i.getAttribute('role') === 'combobox') {
+                if (!tipo && (lab.includes('tipo') || lab.includes('documento'))) {
+                    i.setAttribute('data-bot-tipo', '1'); tipo = true;
+                }
+                continue;
+            }
+            if (!doc && (lab.includes('documento') || lab.includes('identificacion')
+                         || lab.includes('cedula') || lab.includes('numero')
+                         || ph.includes('documento') || ph.includes('cedula')
+                         || /\\d{6,}/.test(ph))) {
+                i.setAttribute('data-bot-doc', '1'); doc = true;
+            }
+        }
+        return {doc: doc, tipo: tipo};
+    """)
+
+    if not campos["doc"]:
+        log("    ERROR: No se encontro el campo de numero de documento")
+        await inspeccionar_formulario(page, f"participante_{indice}")
+        await debug_screenshot(page, f"08_sin_campo_cedula_{indice}")
+        return False
+
+    # Tipo de documento
+    if campos["tipo"]:
+        tipo_combo = page.locator('[data-bot-tipo="1"]')
+        valor = await tipo_combo.input_value()
+        if "cedula" not in quitar_tildes(valor or "").lower():
+            try:
+                await tipo_combo.click(timeout=5000)
+                await page.wait_for_timeout(300)
+                await tipo_combo.fill("Cedula")
+                await page.wait_for_timeout(700)
+                await page.evaluate("""() => {
+                    for (const o of document.querySelectorAll('[role="option"]')) {
+                        const t = (o.textContent || '').normalize('NFD')
+                            .replace(/[\\u0300-\\u036f]/g, '').toLowerCase();
+                        if (t.includes('cedula') && t.includes('ciudadan')) {
+                            o.click(); return true;
+                        }
+                    }
+                    return false;
+                }""")
+                await page.wait_for_timeout(400)
+                log(f"    Tipo doc: {await tipo_combo.input_value()}")
+            except Exception as e:
+                log(f"    ADVERTENCIA: no se pudo fijar el tipo de documento ({type(e).__name__})")
+
+    # Numero de documento
+    doc_input = page.locator('[data-bot-doc="1"]')
+    try:
+        await doc_input.click(timeout=5000)
+        await doc_input.fill(str(cedula))
+        await page.wait_for_timeout(300)
+        if not await doc_input.input_value():
+            raise ValueError("quedo vacio")
+    except Exception:
+        log("    Escribiendo la cedula por JavaScript...")
+        await page.evaluate("""(ced) => {
+            const i = document.querySelector('[data-bot-doc="1"]');
+            if (!i) return false;
+            i.removeAttribute('maxlength');
+            const setter = Object.getOwnPropertyDescriptor(
+                window.HTMLInputElement.prototype, 'value').set;
+            setter.call(i, ced);
+            i.dispatchEvent(new Event('input', {bubbles: true}));
+            i.dispatchEvent(new Event('change', {bubbles: true}));
+            return true;
+        }""", str(cedula))
+        await page.wait_for_timeout(400)
+
+    # Buscar / Agregar dentro del dialogo
+    pulsado = await _js(page, """
+        const zona = dialogo() || drawer();
+        const b = boton(zona, ['buscar', 'agregar', 'anadir', 'aceptar']);
+        if (!b) return '';
+        b.click();
+        return (b.textContent || '').trim();
+    """)
+
+    if pulsado:
+        log(f"    Clic en '{pulsado}'")
+    else:
+        await doc_input.press("Enter")
+        log("    Enter (no habia boton Buscar)")
+
+    await page.wait_for_timeout(1800)
+
+    # Si 'Buscar' solo consulta la persona, hace falta un segundo clic
+    # en 'Agregar'/'Aceptar' para meterla en la tabla.
+    if quitar_tildes(pulsado).lower().startswith("buscar"):
+        segundo = await _js(page, """
+            const zona = dialogo() || drawer();
+            const b = boton(zona, ['agregar', 'aceptar', 'anadir', 'confirmar']);
+            if (!b) return '';
+            if (norm(b.textContent).includes('participante')) return '';
+            b.click();
+            return (b.textContent || '').trim();
+        """)
+        if segundo:
+            log(f"    Clic en '{segundo}'")
+            await page.wait_for_timeout(1500)
+
+    aviso = await _js(page, "return toast();")
+    if aviso:
+        log(f"    AVISO de SIMON: {aviso}")
+
+    return True
+
+
+async def _filas_tabla(page: Page):
+    """Cedulas que YA estan en la tabla de participantes del panel."""
+    return await _js(page, """
+        const d = drawer();
+        if (!d) return [];
+        return [...d.querySelectorAll('tbody tr')]
+            .map(tr => (tr.children[1]?.textContent || '').trim())
+            .filter(x => x);
+    """)
+
+
+async def agregar_participantes(page: Page, cedulas: list, reservas: list = None):
+    """
+    Agrega las cedulas del grupo y verifica una por una contra la tabla.
+    Si alguna no entra (no esta registrada en SIMON, inactiva, etc.) toma
+    suplentes de 'reservas' hasta completar el minimo que exige SIMON.
+    """
+    reservas = list(reservas or [])
+    minimo = CONFIG.get("MIN_PARTICIPANTES", 10)
+
+    log(f"  Agregando {len(cedulas)} participantes (minimo exigido: {minimo})...")
+    await page.wait_for_timeout(1000)
     await debug_screenshot(page, "07_form_participantes")
 
-    exitosos = 0
-    for i, cedula in enumerate(cedulas):
-        ok = await agregar_participante_uno(page, cedula, i + 1, len(cedulas))
-        if ok:
-            exitosos += 1
+    en_tabla = await _filas_tabla(page)
+    log(f"  Ya en la tabla: {len(en_tabla)} ({', '.join(en_tabla) or 'ninguno'})")
 
-    log(f"  Participantes agregados: {exitosos}/{len(cedulas)}")
+    if not await _abrir_dialogo_participantes(page):
+        log("  ERROR: no se pudo abrir el dialogo de participantes")
+        await inspeccionar_formulario(page, "sin_dialogo_participantes")
+        await debug_screenshot(page, "07_sin_dialogo")
+        return False
+
+    fallidas = []
+    pendientes = [c for c in cedulas if str(c).strip()]
+
+    async def _intentar(cedula, i, total):
+        antes = await _filas_tabla(page)
+        if str(cedula) in antes:
+            log(f"  Cedula {cedula} ya estaba en la tabla, se omite")
+            return True
+        await agregar_participante_uno(page, cedula, i, total)
+        despues = await _filas_tabla(page)
+        if str(cedula) in despues:
+            log(f"    -> OK, quedo en la tabla ({len(despues)} participantes)")
+            return True
+        log(f"    -> NO entro en la tabla (revisa si {cedula} esta registrada en SIMON)")
+        return False
+
+    for i, cedula in enumerate(pendientes):
+        if not await _intentar(cedula, i + 1, len(pendientes)):
+            fallidas.append(str(cedula))
+
+    # Segunda pasada: reintentar las que no entraron (suele ser lentitud de SIMON)
+    if fallidas:
+        log(f"  Reintentando {len(fallidas)} cedula(s): {', '.join(fallidas)}")
+        quedan = []
+        for i, cedula in enumerate(fallidas):
+            await page.wait_for_timeout(1500)
+            if not await _intentar(cedula, i + 1, len(fallidas)):
+                quedan.append(cedula)
+        fallidas = quedan
+
+    # Completar con suplentes si quedamos cortos
+    while len(await _filas_tabla(page)) < minimo and reservas:
+        suplente = reservas.pop(0)
+        log(f"  Faltan participantes, probando suplente {suplente}...")
+        await _intentar(suplente, 0, 0)
+
+    # Cerrar el dialogo si sigue abierto
+    await _js(page, """
+        const d = dialogo();
+        if (!d) return false;
+        const b = boton(d, ['guardar', 'aceptar', 'listo', 'cerrar', 'cancelar']);
+        if (b) { b.click(); return true; }
+        return false;
+    """)
+    await page.wait_for_timeout(1200)
+
+    final = await _filas_tabla(page)
+    log(f"  Participantes en la tabla: {len(final)}/{minimo}")
+    log(f"    {', '.join(final)}")
+    if fallidas:
+        log(f"  CEDULAS QUE NO ENTRARON: {', '.join(fallidas)}")
     await debug_screenshot(page, "08_participantes_completo")
-    return exitosos > 0
+
+    if len(final) < minimo:
+        faltan = minimo - len(final)
+        log(f"  ERROR: SIMON exige {minimo} participantes y solo hay {len(final)}. "
+            f"Faltan {faltan}.")
+        log(f"  Agrega {faltan} cedula(s) mas en CEDULAS_GRUPO o en "
+            f"CEDULAS_RESERVA dentro de config.py")
+        PARTICIPANTES_FALTANTES.append(
+            f"solo {len(final)}/{minimo} participantes"
+            + (f"; no entraron: {', '.join(fallidas)}" if fallidas else "")
+        )
+        return False
+
+    return True
 
 
 # ── Paso 7: Guardar reserva ───────────────────────────────────────────
 
+async def _pulsar_guardar(page: Page, donde: str):
+    """
+    donde = 'panel'  -> boton Guardar DENTRO del panel lateral
+    donde = 'pagina' -> boton Guardar del formulario principal
+                        (explicitamente FUERA del panel y de cualquier dialogo)
+    """
+    return await _js(page, """
+        const zona = args.donde === 'panel' ? drawer() : null;
+        if (args.donde === 'panel') {
+            const b = boton(zona, ['guardar', 'finalizar']);
+            if (!b) return '';
+            b.click();
+            return (b.textContent || '').trim();
+        }
+        for (const b of document.querySelectorAll('button')) {
+            if (!visible(b) || b.disabled) continue;
+            if (b.closest('.MuiDrawer-paper') || b.closest('.MuiDialog-paper')) continue;
+            const t = norm(b.textContent);
+            if (t === 'guardar' || t === 'finalizar' || t === 'confirmar reserva') {
+                b.scrollIntoView({block: 'center'});
+                b.click();
+                return (b.textContent || '').trim();
+            }
+        }
+        return '';
+    """, {"donde": donde})
+
+
 async def guardar_reserva(page: Page):
-    """Hace clic en el boton GUARDAR para finalizar la reserva"""
-    log("  Buscando boton GUARDAR...")
+    """
+    SIMON guarda en DOS pasos:
+      1. 'Guardar' dentro del panel 'Creacion de Reserva'
+         -> cierra el panel y agrega el bloque al formulario
+      2. 'Guardar' al final del formulario principal
+         -> esto es lo que realmente crea la reserva
 
+    El bot solo hacia el paso 1, por eso el log decia OK pero no aparecia
+    ninguna reserva en SIMON.
+    """
+    log("  Guardando la reserva...")
+    await debug_screenshot(page, "09_antes_guardar")
+
+    # ── Paso 1: Guardar dentro del panel ──
+    p1 = await _pulsar_guardar(page, "panel")
+    if not p1:
+        log("  ERROR: no hay boton 'Guardar' habilitado en el panel")
+        await inspeccionar_formulario(page, "sin_guardar_panel")
+        await debug_screenshot(page, "09_sin_guardar_panel")
+        return False
+
+    log(f"  [1/2] Clic en '{p1}' dentro del panel")
+    await page.wait_for_timeout(3000)
+
+    aviso = await _js(page, "return toast();")
+    if aviso:
+        log(f"       SIMON responde: {aviso}")
+        a = quitar_tildes(aviso).lower()
+        if "500" in a or "al menos" in a or "minimo" in a or "error" in a:
+            log("  El panel rechazo la reserva")
+            await debug_screenshot(page, "09_panel_rechazo")
+            return False
+
+    if await _js(page, "return drawer() !== null;"):
+        log("  El panel no se cerro, la reserva no avanzo")
+        await inspeccionar_formulario(page, "panel_sigue_abierto")
+        await debug_screenshot(page, "09_panel_abierto")
+        return False
+
+    await debug_screenshot(page, "09b_bloque_en_formulario")
+
+    # ── Paso 2: Guardar del formulario principal ──
     await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-    await page.wait_for_timeout(1000)
+    await page.wait_for_timeout(1200)
 
-    guardar_btns = [
-        page.locator('button:has-text("GUARDAR")').first,
-        page.locator('button:has-text("Guardar")').first,
-        page.locator('button:has-text("guardar")').first,
-        page.locator('button:has-text("Confirmar reserva")').first,
-        page.locator('button:has-text("Finalizar")').first,
-    ]
+    url_antes = page.url
+    p2 = await _pulsar_guardar(page, "pagina")
+    if not p2:
+        log("  ERROR: no aparecio el boton 'Guardar' del formulario principal")
+        await inspeccionar_formulario(page, "sin_guardar_final")
+        await debug_screenshot(page, "09_sin_guardar_final")
+        return False
 
-    for btn in guardar_btns:
-        if await btn.count() > 0:
-            is_disabled = await btn.is_disabled()
-            if not is_disabled:
-                log("  Haciendo clic en GUARDAR...")
-                await debug_screenshot(page, "09_antes_guardar")
-                await btn.click()
-                await page.wait_for_timeout(3000)
-                await debug_screenshot(page, "10_despues_guardar")
-                log("  RESERVA GUARDADA!")
-                return True
-            else:
-                log("  Boton GUARDAR esta deshabilitado")
-                await debug_screenshot(page, "09_guardar_deshabilitado")
-                return False
+    log(f"  [2/2] Clic en '{p2}' del formulario principal")
+    await page.wait_for_timeout(4000)
 
-    log("  ERROR: No se encontro boton GUARDAR")
-    await debug_screenshot(page, "09_sin_guardar")
+    # Posible dialogo de confirmacion
+    conf = await _js(page, """
+        const d = dialogo();
+        if (!d) return '';
+        const b = boton(d, ['aceptar', 'confirmar', 'si', 'guardar']);
+        if (!b) return '';
+        b.click();
+        return (b.textContent || '').trim();
+    """)
+    if conf:
+        log(f"       Confirmacion: clic en '{conf}'")
+        await page.wait_for_timeout(3500)
+
+    await debug_screenshot(page, "10_despues_guardar")
+
+    # ── Verificacion ──
+    aviso = await _js(page, "return toast();")
+    if aviso:
+        log(f"       SIMON responde: {aviso}")
+        a = quitar_tildes(aviso).lower()
+        if "500" in a or "error" in a or "no se pudo" in a or "al menos" in a:
+            log("  La reserva NO se guardo")
+            return False
+        if ("exito" in a or "correct" in a or "guardad" in a
+                or "creada" in a or "registrad" in a):
+            log("  SIMON confirmo la reserva")
+            return True
+
+    if page.url != url_antes:
+        log(f"  SIMON redirigio a {page.url} (reserva creada)")
+        return True
+
+    log("  ADVERTENCIA: SIMON no dio confirmacion explicita, se verificara en Seguimiento")
+    return True
+
+
+async def verificar_reserva_creada(page: Page, bloque: dict):
+    """
+    Comprobacion final de verdad: entra a Seguimiento y busca la reserva.
+    Evita reportar 'RESERVA EXITOSA' cuando en realidad no quedo nada.
+    """
+    log("  Verificando en Seguimiento...")
+    try:
+        await page.goto(CONFIG["URL_SEGUIMIENTO"],
+                        wait_until="domcontentloaded", timeout=60000)
+        await page.wait_for_timeout(4000)
+    except Exception as e:
+        log(f"    No se pudo abrir Seguimiento: {type(e).__name__}")
+        return None  # desconocido
+
+    fecha_iso = bloque.get("fecha", "")
+    try:
+        fecha_txt = datetime.strptime(fecha_iso, "%Y-%m-%d").strftime("%d/%m/%Y")
+    except (ValueError, TypeError):
+        fecha_txt = ""
+
+    texto = await page.evaluate("() => document.body.innerText || ''")
+    await debug_screenshot(page, "11_seguimiento")
+
+    if fecha_txt and fecha_txt in texto:
+        log(f"    CONFIRMADO: aparece una reserva para {fecha_txt}")
+        return True
+
+    log(f"    NO aparece ninguna reserva para {fecha_txt} en Seguimiento")
     return False
 
 
@@ -920,24 +1187,53 @@ async def intentar_reserva(usuario_key: str = "1"):
                         if not click_ok:
                             continue
 
-                        await page.wait_for_timeout(2000)
-                        await debug_screenshot(page, "06b_bloque_clickeado")
+                        # Panel lateral "Creacion de Reserva" -> Agregar
+                        drawer_ok = await agregar_bloque_drawer(page, bloque)
+                        if not drawer_ok:
+                            log("  No se pudo abrir el panel, probando el siguiente bloque...")
+                            await _cerrar_panel(page)
+                            continue
 
                         # Agregar participantes
-                        part_ok = await agregar_participantes(page, cedulas)
+                        part_ok = await agregar_participantes(
+                            page, cedulas, CONFIG.get(f"CEDULAS_RESERVA_{usuario_key}", []))
                         if not part_ok:
+                            log("  No se agregaron participantes, se descarta este bloque")
+                            await _cerrar_panel(page)
                             continue
 
                         # Guardar
                         guard_ok = await guardar_reserva(page)
+
+                        if guard_ok:
+                            # Comprobacion real contra Seguimiento
+                            confirmada = await verificar_reserva_creada(page, bloque)
+                            if confirmada is False:
+                                log("  SIMON no registro la reserva, se descarta")
+                                guard_ok = False
+                            elif confirmada is None:
+                                bloque["sin_verificar"] = True
+
                         if guard_ok:
                             log(f"\n{'*'*60}")
                             log(f"RESERVA EXITOSA!")
                             log(f"  Escenario: {escenario}")
                             log(f"  Tercio: {tercio}")
-                            log(f"  Bloque: {bloque.get('title') or bloque.get('text', '?')}")
+                            log(f"  Bloque: {bloque.get('confirmado') or bloque.get('etiqueta', '?')}")
                             log(f"{'*'*60}\n")
+                            DETALLE_RESERVA[usuario_key] = (
+                                f"{escenario} | {tercio} | "
+                                f"{bloque.get('confirmado') or bloque.get('etiqueta', '?')}"
+                                + (" (sin verificar en Seguimiento)"
+                                   if bloque.get("sin_verificar") else "")
+                            )
                             return True
+
+                        # Guardar fallo: el formulario quedo en un estado
+                        # intermedio (o estamos en Seguimiento), asi que se
+                        # recarga la pagina antes de seguir probando.
+                        log("  No se completo la reserva, recargando el formulario...")
+                        break
 
                     # Si no se pudo reservar, volver a la pagina de reserva
                     await page.goto(CONFIG["URL_RESERVAS"], wait_until="domcontentloaded", timeout=60000)
@@ -952,7 +1248,8 @@ async def intentar_reserva(usuario_key: str = "1"):
         except Exception as e:
             log(f"ERROR: {type(e).__name__}: {e}")
             await debug_screenshot(page, "99_error")
-            raise
+            DETALLE_RESERVA[usuario_key] = f"ERROR: {type(e).__name__}: {str(e)[:150]}"
+            return False
         finally:
             await browser.close()
 
@@ -985,6 +1282,24 @@ async def verificar_y_reservar():
     log("\n" + "="*60)
     log(f"Resultado final: Usuario1={'OK' if ok1 else 'FALLO'} | Usuario2={'OK' if ok2 else 'FALLO'}")
     log("="*60)
+
+    # ── Aviso por Telegram (nunca debe tumbar el bot) ──
+    if telegram_notify is not None:
+        try:
+            motivo = "; ".join(PARTICIPANTES_FALTANTES)
+            if motivo:
+                for k in ("1", "2"):
+                    if not DETALLE_RESERVA[k]:
+                        DETALLE_RESERVA[k] = motivo
+            telegram_notify.reportar([
+                {"usuario": "1", "ok": ok1, "detalle": DETALLE_RESERVA["1"]},
+                {"usuario": "2", "ok": ok2, "detalle": DETALLE_RESERVA["2"]},
+            ])
+        except Exception as e:
+            log(f"[telegram] fallo el aviso: {type(e).__name__}: {e}")
+    else:
+        log("[telegram] modulo no disponible, se omite el aviso")
+
     return ok1 or ok2
 
 

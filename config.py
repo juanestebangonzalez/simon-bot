@@ -46,24 +46,23 @@ CONFIG = {
 
     # ── Dias y horas deseados ──────────────────────────────────────────
     # 0=lunes, 1=martes, 2=miercoles, 3=jueves, 4=viernes, 5=sabado, 6=domingo
-    "DIAS_DESEADOS": [0, 1, 3],  # Martes y Jueves
+    "DIAS_DESEADOS": [0, 3],  # 0=Lunes, 3=Jueves
     "HORA_MINIMA": "20:00",   # Despues de las 8pm
 
     # ── Participantes (cedulas) ────────────────────────────────────────
     # Grupo 1: para la reserva del usuario 1 (minimo 10)
     "CEDULAS_GRUPO_1": [
-        # PEGA AQUI LAS 10 CEDULAS DEL GRUPO 1
-        # Ejemplo:
-        "1020304051",
-        "1000763691",
-        "1017162628",
-        "71219346",
-        "1036425407",
-        "1000439660",
-        "1128427246",
-        "1014283520",
-        "16051296",
-        
+        # Personas asociadas a Juan Esteban Gonzalez en SIMON.
+        # 9 cedulas + el que reserva = 10 (el minimo que exige SIMON).
+        "8063004",      # EDWAR CAMILO RIOS CORREA
+        "1000763691",   # MARVIN SANTIAGO BEDOYA AGUDELO
+        "1017162628",   # MANUEL FERNANDO CORTES GIL
+        "71219346",     # LUIS FERNANDO PUERTA BETANCUR
+        "1036425407",   # JULIAN QUINTERO GIRALDO
+        "1000439660",   # JUAN ESTEBAN MORENO TOBON
+        "1128427246",   # ANDERSON ECHAVARRIA GIRALDO
+        "1014283520",   # JOHN ALEXANDER MORALES RIVERA
+        "16051296",     # SILVIO GONZALEZ
     ],
 
     # Grupo 2: para la reserva del usuario 2 (minimo 10)
@@ -80,6 +79,23 @@ CONFIG = {
         "1072529894"
         
     ],
+
+    # ── Participantes de respaldo ──────────────────────────────────────
+    # SIMON exige minimo 10 participantes (incluido quien reserva).
+    # Si alguna cedula del grupo falla (no esta registrada en SIMON,
+    # esta inactiva, etc.) el bot va tomando de esta lista hasta completar.
+    "MIN_PARTICIPANTES": 10,
+    "CEDULAS_RESERVA_1": [
+        # Agrega aqui cedulas suplentes del grupo 1
+    ],
+    "CEDULAS_RESERVA_2": [
+        # Agrega aqui cedulas suplentes del grupo 2
+    ],
+
+    # ── Telegram (avisos) ──────────────────────────────────────────────
+    # Se configuran en el archivo .env, nunca aqui (este archivo esta en GitHub)
+    "TELEGRAM_TOKEN": os.getenv("TELEGRAM_TOKEN", ""),
+    "TELEGRAM_CHAT_ID": os.getenv("TELEGRAM_CHAT_ID", ""),
 
     # ── Playwright ─────────────────────────────────────────────────────
     "HEADLESS": False,
@@ -99,4 +115,5 @@ CONFIG = {
     "URL_LOGIN": "https://simon.inder.gov.co/login/",
     "URL_RESERVAS": "https://simon.inder.gov.co/apps/scenarios/booking/list/",
     "URL_BOOKING": "https://simon.inder.gov.co/apps/scenarios/booking/add/",
+    "URL_SEGUIMIENTO": "https://simon.inder.gov.co/apps/scenarios/tracking/list/",
 }
