@@ -48,7 +48,20 @@ CONFIG = {
 
     # ── Dias y horas deseados ──────────────────────────────────────────
     # 0=lunes, 1=martes, 2=miercoles, 3=jueves, 4=viernes, 5=sabado, 6=domingo
-    "DIAS_DESEADOS": [0, 3],  # 0=Lunes, 3=Jueves
+    # Dias por usuario. 0=lunes 1=martes 2=miercoles 3=jueves
+    #                   4=viernes 5=sabado 6=domingo
+    #
+    # OJO: SIMON solo muestra 2 dias hacia adelante, asi que cada corrida
+    # solo alcanza los dias +2 y +3:
+    #    corre lunes   -> miercoles, jueves
+    #    corre viernes -> domingo, lunes
+    #    corre sabado  -> lunes, martes
+    # Agregar un dia aqui no sirve si ninguna corrida lo alcanza.
+    "DIAS_DESEADOS_1": [0, 3],   # usuario 1: lunes y jueves
+    "DIAS_DESEADOS_2": [2],      # usuario 2: miercoles
+
+    # Respaldo si algun dia se quiere lo mismo para los dos
+    "DIAS_DESEADOS": [0, 3],
     "HORA_MINIMA": "20:00",   # Despues de las 8pm
 
     # ── Participantes (cedulas) ────────────────────────────────────────
@@ -119,6 +132,11 @@ CONFIG = {
     "DEBUG_DIR": os.path.join(os.path.dirname(os.path.abspath(__file__)), "debug"),
     "DEBUG_DIAS_RETENCION": 7,   # borra capturas y logs mas viejos que esto
     "LOGS_DIR": os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs"),
+
+    # Memoria de los dias ya reservados, para que una corrida no pise
+    # lo que hizo la anterior. No se sube a GitHub.
+    "RESERVAS_FILE": os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "reservas.json"),
 
     # ── URLs ───────────────────────────────────────────────────────────
     "URL_BASE": "https://simon.inder.gov.co",

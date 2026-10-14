@@ -13,6 +13,9 @@ Flujo:
 """
 
 import asyncio
+import json
+import os
+import re
 import unicodedata
 from datetime import datetime
 from pathlib import Path
@@ -175,6 +178,105 @@ def _volcar_errores_api(desde=0):
         log(f"     respondio: {e['respuesta']}")
         resumen.append(f"HTTP {e['status']} en {e['url'].split('/')[-1] or e['url']}")
     return "; ".join(resumen)
+
+
+
+# ── Memoria de reservas entre corridas ────────────────────────────────
+
+def _archivo_reservas():
+    return Path(CONFIG.get(
+        "RESERVAS_FILE",
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "reservas.json"),
+    ))
+
+
+def cargar_reservas():
+    """
+    Lee las fechas ya reservadas en corridas anteriores y descarta las que
+    ya pasaron. Sin esto, la corrida del sabado no sabria que la del viernes
+    ya aparto el lunes, y lo reservaria dos veces.
+    """
+    f = _archivo_reservas()
+    if not f.exists():
+        return
+    try:
+        datos = json.loads(f.read_text(encoding="utf-8"))
+    except Exception as e:
+        log(f"No se pudo leer {f.name}: {type(e).__name__}")
+        return
+
+    hoy = datetime.now().strftime("%Y-%m-%d")
+    vigentes = {k: v for k, v in datos.items() if k >= hoy}
+    FECHAS_RESERVADAS.update(vigentes.keys())
+
+    if vigentes:
+        detalle = ", ".join(f"{k} (usuario {v.get('usuario', '?')})"
+                            for k, v in sorted(vigentes.items()))
+        log(f"Reservas ya hechas que siguen vigentes: {detalle}")
+    if len(datos) != len(vigentes):
+        _guardar_reservas(vigentes)
+
+
+def _guardar_reservas(datos):
+    try:
+        _archivo_reservas().write_text(
+            json.dumps(datos, indent=2, ensure_ascii=False), encoding="utf-8")
+    except Exception as e:
+        log(f"No se pudo guardar reservas.json: {type(e).__name__}: {e}")
+
+
+def anotar_reserva(fecha, usuario_key, detalle=""):
+    """Deja constancia en disco de una reserva lograda."""
+    if not fecha:
+        return
+    FECHAS_RESERVADAS.add(fecha)
+    f = _archivo_reservas()
+    datos = {}
+    if f.exists():
+        try:
+            datos = json.loads(f.read_text(encoding="utf-8"))
+        except Exception:
+            datos = {}
+    datos[fecha] = {
+        "usuario": usuario_key,
+        "cuando": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "detalle": detalle,
+    }
+    _guardar_reservas(datos)
+
+
+async def fechas_ya_reservadas(page: Page):
+    """
+    Lee el Seguimiento del usuario que acaba de entrar y devuelve las fechas
+    que ya tiene reservadas. Cubre las reservas hechas a mano o en corridas
+    anteriores, que el archivo local no conoce.
+    """
+    try:
+        await page.goto(CONFIG["URL_SEGUIMIENTO"],
+                        wait_until="domcontentloaded", timeout=60000)
+        await page.wait_for_timeout(3500)
+    except Exception as e:
+        log(f"  No se pudo abrir Seguimiento: {type(e).__name__}")
+        return set()
+
+    texto = await page.evaluate("() => document.body.innerText || ''")
+    hoy = datetime.now().date()
+    encontradas = set()
+
+    for m in re.finditer(r"\b(\d{2})/(\d{2})/(\d{4})\b", texto):
+        d, mes, a = m.groups()
+        try:
+            f = datetime(int(a), int(mes), int(d)).date()
+        except ValueError:
+            continue
+        if f >= hoy:
+            encontradas.add(f.strftime("%Y-%m-%d"))
+
+    if encontradas:
+        log(f"  Ya tiene reservas para: {', '.join(sorted(encontradas))}")
+    else:
+        log("  Sin reservas futuras en Seguimiento")
+    return encontradas
 
 
 # ── Paso 1: Login ─────────────────────────────────────────────────────
@@ -552,6 +654,11 @@ async def filtrar_bloques_deseados(bloques: list, usuario_key: str = ""):
     """
     hora_min = int(str(CONFIG.get("HORA_MINIMA", "20:00")).split(":")[0])
     una_por_dia = CONFIG.get("UNA_RESERVA_POR_DIA", True)
+    # Cada usuario tiene sus propios dias; si no, se usa la lista general
+    dias_usuario = CONFIG.get(f"DIAS_DESEADOS_{usuario_key}") \
+        or CONFIG["DIAS_DESEADOS"]
+    log(f"  Dias que busca el usuario {usuario_key or '?'}: "
+        f"{', '.join(DIAS_ES[d] for d in dias_usuario)}")
     deseados = []
     descartados_por_dia = set()
 
@@ -564,7 +671,7 @@ async def filtrar_bloques_deseados(bloques: list, usuario_key: str = ""):
         dia = fecha.weekday()  # 0=lunes ... 6=domingo
         hora = b.get("hora", 0)
 
-        if dia not in CONFIG["DIAS_DESEADOS"]:
+        if dia not in dias_usuario:
             continue
         if hora < hora_min:
             continue
@@ -1369,6 +1476,12 @@ async def intentar_reserva(usuario_key: str = "1"):
                 log("ERROR: Login fallido")
                 return False
 
+            # Aprender que dias ya tiene reservados este usuario, para no
+            # pedir dos veces el mismo dia.
+            if CONFIG.get("UNA_RESERVA_POR_DIA", True):
+                FECHAS_RESERVADAS.update(await fechas_ya_reservadas(page))
+
+
             # 2-4. Probar cada escenario y tercio
             for escenario in CONFIG["ESCENARIOS"]:
                 log(f"\n{'='*60}")
@@ -1440,8 +1553,10 @@ async def intentar_reserva(usuario_key: str = "1"):
                             bloque["sin_verificar"] = True
 
                         if guard_ok:
-                            if bloque.get("fecha"):
-                                FECHAS_RESERVADAS.add(bloque["fecha"])
+                            anotar_reserva(
+                                bloque.get("fecha"), usuario_key,
+                                bloque.get("confirmado")
+                                or bloque.get("etiqueta", ""))
                             log(f"\n{'*'*60}")
                             log("RESERVA EXITOSA!")
                             log(f"  Escenario: {escenario}")
@@ -1490,6 +1605,7 @@ async def verificar_y_reservar():
     Funcion principal: intenta reservar para ambos usuarios.
     """
     limpiar_debug(CONFIG.get("DEBUG_DIAS_RETENCION", 7))
+    cargar_reservas()
 
     log("="*60)
     log("BOT SIMON INDER 2.0 — Inicio")
