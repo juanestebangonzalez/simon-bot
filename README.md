@@ -22,10 +22,10 @@ Como SIMON solo deja reservar con 2 dias de anticipacion, el cron corre
 **viernes** (para el lunes) y **lunes** (para el jueves), a las 00:01
 hora Colombia.
 
-El usuario 2 funciona como **respaldo del usuario 1**, no como una segunda
-reserva: si el 1 ya aparto el lunes, el 2 solo intenta otro dia, y si no hay
-otro dia se reporta como "No aplica" (no como fallo). Para desactivarlo,
-poner `UNA_RESERVA_POR_DIA` en `False` en `config.py`.
+Cada usuario tiene su dia asignado en `DIAS_DESEADOS_1` y `DIAS_DESEADOS_2`
+(`config.py`): el usuario 1 va por el lunes y el usuario 2 por el jueves, asi
+que nunca compiten por el mismo cupo. Si aun asi dos coincidieran en un dia,
+`UNA_RESERVA_POR_DIA` impide la reserva doble.
 
 ## Archivos
 
