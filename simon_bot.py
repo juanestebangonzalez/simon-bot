@@ -35,6 +35,9 @@ DETALLE_RESERVA = {"1": "", "2": ""}
 # Motivos por los que no se pudo completar (para el aviso de Telegram)
 PARTICIPANTES_FALTANTES = []
 
+# Mensajes con los que SIMON rechazo una reserva (para el aviso de Telegram)
+MOTIVOS_RECHAZO = []
+
 # Fechas que ya quedaron reservadas en esta corrida.
 # Regla del grupo: una sola reserva por dia entre los dos usuarios, asi que
 # si el usuario 1 logra el lunes, el usuario 2 no puede volver a pedir el lunes.
@@ -1311,24 +1314,36 @@ async def guardar_reserva(page: Page):
     await debug_screenshot(page, "10_despues_guardar")
 
     # ── Verificacion ──
+    # SIMON solo saca un toast cuando tiene algo que decir, y casi siempre es
+    # para rechazar. Antes se buscaban palabras de error ("error", "500"...)
+    # y todo lo demas pasaba por bueno, asi que un mensaje como
+    #   "El Bloque configurado de 22:00 a 23:00 para la division Tercio 1 se
+    #    encuentra ocupado en la Fecha 2026-10-22, debe seleccionar otra fecha"
+    # se tomaba como exito. Ahora es al reves: solo valen las palabras de
+    # exito, cualquier otro mensaje es un rechazo.
+    PALABRAS_EXITO = ("exito", "exitosa", "correct", "guardad", "creada",
+                      "registrad", "almacenad")
+
     aviso = await _js(page, "return toast();")
     if aviso:
         log(f"       SIMON responde: {aviso}")
         a = quitar_tildes(aviso).lower()
-        if "500" in a or "error" in a or "no se pudo" in a or "al menos" in a:
-            log("  La reserva NO se guardo")
-            return False
-        if ("exito" in a or "correct" in a or "guardad" in a
-                or "creada" in a or "registrad" in a):
+        if any(pz in a for pz in PALABRAS_EXITO):
             log("  SIMON confirmo la reserva")
             return True
+        log("  SIMON RECHAZO la reserva. Se probara el siguiente bloque.")
+        MOTIVOS_RECHAZO.append(aviso.strip()[:180])
+        return False
 
     if page.url != url_antes:
         log(f"  SIMON redirigio a {page.url} (reserva creada)")
         return True
 
-    log("  ADVERTENCIA: SIMON no dio confirmacion explicita, se verificara en Seguimiento")
-    return True
+    # Sin mensaje y sin redireccion no hay nada que confirme la reserva.
+    # Darla por buena es lo que producia los "RESERVA EXITOSA" fantasma.
+    log("  SIMON no confirmo nada. Se da por NO reservada salvo que "
+        "aparezca en Seguimiento.")
+    return False
 
 
 async def verificar_reserva_creada(page: Page, bloque: dict):
@@ -1372,10 +1387,13 @@ async def verificar_reserva_creada(page: Page, bloque: dict):
         return None
 
     if not filas:
-        # No se pudo leer la tabla (no cargo, render distinto, paginacion).
-        # Devolver False aqui haria que el bot creyera que no hay reserva y
-        # volviera a intentar, pudiendo duplicarla. Mejor: desconocido.
-        log("    No se pudo leer la tabla de Seguimiento: resultado desconocido")
+        # Sin filas no se puede afirmar ni negar nada. Se vuelca un trozo de
+        # la pagina al log para descubrir por que no lista (nunca ha listado).
+        texto = await page.evaluate("() => document.body.innerText || ''")
+        limpio = " | ".join(t.strip() for t in texto.splitlines() if t.strip())
+        log("    La tabla de Seguimiento vino vacia. Contenido de la pagina:")
+        log(f"      {limpio[:700]}")
+        log("    Resultado desconocido (ni confirma ni desmiente)")
         return None
 
     PALABRAS_ESTADO = ("pendiente", "aprobad", "confirmad", "activ",
@@ -1573,11 +1591,22 @@ async def intentar_reserva(usuario_key: str = "1"):
                             )
                             return True
 
-                        # Guardar fallo: el formulario quedo en un estado
-                        # intermedio (o estamos en Seguimiento), asi que se
-                        # recarga la pagina antes de seguir probando.
-                        log("  No se completo la reserva, recargando el formulario...")
-                        break
+                        # Guardar fallo. Normalmente es porque SIMON dijo que
+                        # ese bloque ya esta ocupado, asi que todavia pueden
+                        # quedar otras horas libres en el MISMO tercio (si las
+                        # 10pm estan tomadas, las 9pm suelen estar libres).
+                        # Antes se hacia break y se perdian esos bloques.
+                        log("  No se completo la reserva, recargando para "
+                            "probar el siguiente bloque...")
+                        await page.goto(CONFIG["URL_RESERVAS"],
+                                        wait_until="domcontentloaded",
+                                        timeout=60000)
+                        await page.wait_for_timeout(1000)
+                        if not await ir_a_reservar(page, escenario):
+                            break
+                        if not await seleccionar_tercio(page, tercio):
+                            break
+                        continue
 
                     # Si no se pudo reservar, volver a la pagina de reserva
                     await page.goto(CONFIG["URL_RESERVAS"], wait_until="domcontentloaded", timeout=60000)
@@ -1642,7 +1671,7 @@ async def verificar_y_reservar():
     # ── Aviso por Telegram (nunca debe tumbar el bot) ──
     if telegram_notify is not None:
         try:
-            motivo = "; ".join(PARTICIPANTES_FALTANTES)
+            motivo = "; ".join(PARTICIPANTES_FALTANTES + MOTIVOS_RECHAZO)
             if motivo:
                 for k in ("1", "2"):
                     if not DETALLE_RESERVA[k]:
