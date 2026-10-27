@@ -15,7 +15,7 @@ echo "Timezone actual: $(timedatectl | grep 'Time zone')"
 echo "Hora actual: $(date)"
 
 # Agregar cron job
-CRON_LINE="1 5 * * 1,5,6 $HOME/simon_bot/run_bot.sh"
+CRON_LINE="1 5 * * 1,6 $HOME/simon_bot/run_bot.sh"
 
 # Verificar si ya existe
 (crontab -l 2>/dev/null | grep -v "simon_bot/run_bot.sh"; echo "$CRON_LINE") | crontab -
@@ -25,9 +25,8 @@ echo "Cron configurado:"
 crontab -l
 echo ""
 echo "El bot se ejecutara:"
-echo "  - Lunes 00:01 Colombia  -> reserva el JUEVES"
-echo "  - Viernes 00:01 Colombia -> reserva el LUNES"
-echo "  - Sabado 00:01 Colombia  -> segunda oportunidad para el LUNES"
+echo "  - Sabado 00:01 Colombia -> reserva el MARTES (usuario 2)"
+echo "  - Lunes 00:01 Colombia  -> reserva el JUEVES (usuario 1)"
 echo ""
 echo "Para ver los logs:"
 echo "  ls -la ~/simon_bot/logs/"

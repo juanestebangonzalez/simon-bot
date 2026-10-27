@@ -57,8 +57,8 @@ CONFIG = {
     #    corre viernes -> domingo, lunes
     #    corre sabado  -> lunes, martes
     # Agregar un dia aqui no sirve si ninguna corrida lo alcanza.
-    "DIAS_DESEADOS_1": [0],      # usuario 1: lunes
-    "DIAS_DESEADOS_2": [3],      # usuario 2: jueves
+    "DIAS_DESEADOS_1": [3],      # usuario 1: jueves
+    "DIAS_DESEADOS_2": [1],      # usuario 2: martes
 
     # Respaldo si algun dia se quiere lo mismo para los dos
     "DIAS_DESEADOS": [0, 3],

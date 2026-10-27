@@ -11,7 +11,7 @@ el mejor bloque disponible para cada usuario.
 | | |
 |---|---|
 | Escenarios | Moravia, y si no hay, Brasilia |
-| Dias a reservar | lunes y jueves |
+| Dias a reservar | usuario 2 el martes, usuario 1 el jueves |
 | Horario | prioridad 10pm, luego 9pm, luego 8pm |
 | Tercios | 1, 2 y 3 en ese orden |
 | Participantes | 9 cedulas + quien reserva = 10 (minimo de SIMON) |
@@ -19,12 +19,13 @@ el mejor bloque disponible para cada usuario.
 | Aviso | mensaje de Telegram con el resultado |
 
 Como SIMON solo deja reservar con 2 dias de anticipacion, el cron corre
-**viernes** (para el lunes) y **lunes** (para el jueves), a las 00:01
-hora Colombia.
+**sabado** (para el martes) y **lunes** (para el jueves), a las 00:01
+hora Colombia. Cada corrida solo alcanza los dias +2 y +3, asi que agregar
+un dia en config.py no sirve si ninguna corrida lo alcanza.
 
 Cada usuario tiene su dia asignado en `DIAS_DESEADOS_1` y `DIAS_DESEADOS_2`
-(`config.py`): el usuario 1 va por el lunes y el usuario 2 por el jueves, asi
-que nunca compiten por el mismo cupo. Si aun asi dos coincidieran en un dia,
+(`config.py`): el usuario 1 va por el jueves y el usuario 2 por el martes,
+asi que nunca compiten por el mismo cupo. Si aun asi dos coincidieran en un dia,
 `UNA_RESERVA_POR_DIA` impide la reserva doble.
 
 ## Archivos
