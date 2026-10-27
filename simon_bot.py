@@ -38,6 +38,15 @@ PARTICIPANTES_FALTANTES = []
 # Mensajes con los que SIMON rechazo una reserva (para el aviso de Telegram)
 MOTIVOS_RECHAZO = []
 
+# Personas que SIMON rechaza porque ya estan en otra reserva activa del mismo
+# tipo de escenario. Una persona no puede estar en dos reservas activas de
+# cancha sintetica a la vez, asi que se excluyen y se reemplazan por suplentes.
+CEDULAS_BLOQUEADAS = set()
+
+# Lo que hay en la tabla de participantes: {cedula: nombre}. Sirve para
+# traducir el nombre que menciona SIMON en su mensaje de rechazo a una cedula.
+NOMBRES_POR_CEDULA = {}
+
 # Fechas que ya quedaron reservadas en esta corrida.
 # Regla del grupo: una sola reserva por dia entre los dos usuarios, asi que
 # si el usuario 1 logra el lunes, el usuario 2 no puede volver a pedir el lunes.
@@ -1078,14 +1087,57 @@ async def agregar_participante_uno(page: Page, cedula: str, indice: int, total: 
 
 
 async def _filas_tabla(page: Page):
-    """Cedulas que YA estan en la tabla de participantes del panel."""
-    return await _js(page, """
+    """
+    Cedulas que YA estan en la tabla de participantes del panel.
+    De paso guarda el nombre de cada una en NOMBRES_POR_CEDULA, para poder
+    identificar a quien se refiere SIMON cuando rechaza por "El Integrante
+    FULANO se encuentra vinculado a otra reserva activa".
+    """
+    filas = await _js(page, """
         const d = drawer();
         if (!d) return [];
-        return [...d.querySelectorAll('tbody tr')]
-            .map(tr => (tr.children[1]?.textContent || '').trim())
-            .filter(x => x);
+        return [...d.querySelectorAll('tbody tr')].map(tr => ({
+            cedula: (tr.children[1]?.textContent || '').trim(),
+            nombre: (tr.children[2]?.textContent || '').replace(/\\s+/g, ' ').trim(),
+        })).filter(x => x.cedula);
     """)
+    for f in filas:
+        if f.get("nombre"):
+            NOMBRES_POR_CEDULA[f["cedula"]] = f["nombre"]
+    return [f["cedula"] for f in filas]
+
+
+def cedula_de_nombre(nombre: str):
+    """Busca la cedula de un nombre tal como lo escribe SIMON."""
+    objetivo = " ".join(quitar_tildes(nombre).upper().split())
+    for ced, nom in NOMBRES_POR_CEDULA.items():
+        if " ".join(quitar_tildes(nom).upper().split()) == objetivo:
+            return ced
+    return None
+
+
+def registrar_bloqueado(aviso: str):
+    """
+    Si SIMON rechazo por una persona que ya esta en otra reserva, la anota
+    para no volver a incluirla en esta corrida. Retorna la cedula o None.
+    """
+    a = quitar_tildes(aviso).lower()
+    if "integrante" not in a or ("vinculado" not in a and "otra reserva" not in a):
+        return None
+
+    m = re.search(r"[Ii]ntegrante\s+(.+?)\s+se encuentra", aviso)
+    if not m:
+        return None
+    nombre = m.group(1).strip()
+    ced = cedula_de_nombre(nombre)
+    if ced:
+        CEDULAS_BLOQUEADAS.add(ced)
+        log(f"  {nombre} (cedula {ced}) ya esta en otra reserva activa: "
+            f"se excluye y se reemplaza por un suplente")
+    else:
+        log(f"  SIMON rechaza por {nombre}, pero no se pudo ubicar su cedula "
+            f"en la tabla")
+    return ced
 
 
 async def agregar_participantes(page: Page, cedulas: list, reservas: list = None):
@@ -1111,7 +1163,18 @@ async def agregar_participantes(page: Page, cedulas: list, reservas: list = None
         return False
 
     fallidas = []
-    pendientes = [c for c in cedulas if str(c).strip()]
+    pendientes = [c for c in cedulas
+                  if str(c).strip() and str(c) not in CEDULAS_BLOQUEADAS]
+    reservas = [c for c in reservas if str(c) not in CEDULAS_BLOQUEADAS]
+
+    excluidas = [c for c in cedulas if str(c) in CEDULAS_BLOQUEADAS]
+    if excluidas:
+        log(f"  Se excluyen {len(excluidas)} persona(s) que ya estan en otra "
+            f"reserva: {', '.join(excluidas)}")
+        if len(pendientes) + len(reservas) + 1 < minimo:
+            log(f"  AVISO: quedan {len(pendientes) + len(reservas) + 1} "
+                f"participantes posibles y SIMON exige {minimo}. "
+                f"Agrega suplentes en CEDULAS_RESERVA_* de config.py")
 
     async def _intentar(cedula, i, total):
         antes = await _filas_tabla(page)
@@ -1333,6 +1396,7 @@ async def guardar_reserva(page: Page):
             return True
         log("  SIMON RECHAZO la reserva. Se probara el siguiente bloque.")
         MOTIVOS_RECHAZO.append(aviso.strip()[:180])
+        registrar_bloqueado(aviso)
         return False
 
     if page.url != url_antes:
